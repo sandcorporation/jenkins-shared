@@ -1,11 +1,13 @@
 import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
 import kr.sandcorp.ci.DeployGate
 import kr.sandcorp.ci.Nodes
+import kr.sandcorp.ci.PrCheckSkip
 
 /**
  * main 배포 파이프라인 — 저장소 Jenkinsfile 은 이것 한 번만 부른다. 인자·동작은 README.md.
  *
- *   배포할 커밋 확인(built-in) → 이미지 빌드(macos, 못 잡으면 home; 검사 먼저) → 배포(oracle, 실패하면 자동 롤백) → 디스코드
+ *   배포할 커밋 확인(built-in, 재검사 생략 판정) → 이미지 빌드(macos, 못 잡으면 home; 검사와 나란히) → 배포(oracle, 실패하면 자동 롤백) → 디스코드
  */
 def call(Map args) {
     Map cfg = normalize(args)
@@ -82,6 +84,8 @@ Map normalize(Map a) {
         buildSsh      : a.buildSsh ? true : false,
         builder       : a.builder ?: "${a.composeProject}-images".toString(),
         check         : a.check ?: '',
+        // PR 검사가 main 에 들어온 바로 그 트리를 통과시켰으면 배포 전 재검사를 건너뛴다(README 「재검사 생략」). false 면 늘 재검사.
+        skipCheckedTree: a.skipCheckedTree == null ? true : (a.skipCheckedTree ? true : false),
         branch        : a.branch ?: 'main',
         composeProject: a.composeProject,
         composeFiles  : (a.composeFiles ?: ['docker-compose.prod.yml']).join(':'),
@@ -131,6 +135,58 @@ void gate(Map cfg) {
     String prev = currentBuild.previousSuccessfulBuild?.buildVariables?.DEPLOY_SHA ?: ''
     env.SANDCORP_PREVIOUS_SHA = (prev && prev != env.DEPLOY_SHA) ? prev : ''
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollbackSha ? '되돌리기' : '빌드 대기')
+    if (!rollbackSha && cfg.check) {
+        Map s = cfg.skipCheckedTree ? checkedTree(cfg) : PrCheckSkip.recheck('skipCheckedTree: false')
+        echo "== ${s.reason}"
+        if (s.skip) {
+            env.SANDCORP_CHECK_SKIPPED = s.reason
+            currentBuild.description += " · ${s.reason}"
+        }
+    }
+}
+
+// PR 검사가 main 의 이 트리를 이미 통과시켰는가(kr.sandcorp.ci.PrCheckSkip). 무엇이든 실패하면 재검사 쪽으로 간다.
+Map checkedTree(Map cfg) {
+    try {
+        // node·withCredentials 는 몸통이 돌려준 값을 그대로 돌려준다.
+        return node(Nodes.CONTROLLER) {
+            String main = env.SANDCORP_MAIN_SHA
+            String repo = PrCheckSkip.repoSlug(scm.userRemoteConfigs[0].url)
+            if (!repo) { return PrCheckSkip.recheck("GitHub 저장소를 모른다: ${scm.userRemoteConfigs[0].url}") }
+            // 이 노드 작업 공간은 gate 가 방금 main 을 체크아웃한 곳이다.
+            List mine = sh(returnStdout: true, script: "git rev-parse '${main}^{tree}' '${main}^1'").trim().split('\\s+') as List
+            return withCredentials([usernamePassword(credentialsId: Nodes.GITHUB_API_CREDENTIALS, usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+                Map pick = PrCheckSkip.pickPr(main, cfg.branch, githubApi(repo, "commits/${main}/pulls") as List)
+                if (!pick.pr) { return PrCheckSkip.recheck(pick.reason) }
+                String head = pick.pr.headSha
+                return PrCheckSkip.decide(
+                    pr: pick.pr,
+                    mainTree: mine[0],
+                    parentSha: mine[1],
+                    statuses: (githubApi(repo, "commits/${head}/status") as Map).statuses,
+                    compare: githubApi(repo, "compare/${mine[1]}...${head}") as Map,
+                    headTree: (githubApi(repo, "git/commits/${head}") as Map).tree?.sha,
+                )
+            }
+        }
+    } catch (err) {
+        // 사람이 빌드를 멈춘 것은 삼키지 않는다.
+        if (err.getClass().getName().endsWith('FlowInterruptedException')) { throw err }
+        return PrCheckSkip.recheck("판정 실패(${err.getMessage()})")
+    }
+}
+
+// GitHub REST GET. 토큰은 환경변수로만 넘기고 찍지 않는다. 실패(4xx·5xx·시간 초과)는 예외 → 재검사.
+def githubApi(String repo, String path) {
+    String out
+    withEnv(["GH_URL=https://api.github.com/repos/${repo}/${path}"]) {
+        out = sh(returnStdout: true, script: '''#!/bin/sh
+set -e
+curl -fsS --max-time 10 -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$GH_URL"
+''')
+    }
+    // JsonSlurperClassic 은 HashMap·ArrayList 를 돌려줘 CPS 직렬화에 걸리지 않는다(JsonSlurper 의 LazyMap 은 걸린다).
+    return new JsonSlurperClassic().parseText(out)
 }
 
 // 이전 빌드에서 배포한 main sha. 라이브러리 전환 전 빌드는 SANDCORP_MAIN_SHA 대신 DEPLOY_SHA(=main)만 있다.
@@ -164,25 +220,20 @@ void buildOnNodes(Map cfg) {
     sandcorpBuildNode(builder: params.BUILDER ?: 'auto', waitSeconds: waitSec) { String where -> buildHere(cfg, where) }
 }
 
-// 이 노드에서 배포할 sha 를 체크아웃하고, 검사를 돌린 뒤 이미지를 굽는다. where = macos | home.
+// 이 노드에서 배포할 sha 를 체크아웃하고, 검사와 이미지 굽기를 나란히 돌린다. where = macos | home.
+// 검사가 실패하면 굽기를 끊고 빌드가 실패해 배포 단계로 가지 않는다(GitHub 무료 요금제라 병합을 막지 못해 여기서 막는다).
+// 검사가 끝나기 전에 ghcr 에 <repo>:<sha> 가 올라갈 수는 있지만, 그 이미지를 운영에 올리는 길은 검사를 통과한 이 빌드의 배포 단계뿐이다
+// (ROLLBACK_SHA 로 그 sha 를 일부러 고르는 경우는 사람의 선택이다).
 void buildHere(Map cfg, String where) {
     checkout scm
     sh "git checkout -q --detach ${env.DEPLOY_SHA}"
     env.BUILT_ON = where
-    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · 빌드 ${where}"
+    String skipped = env.SANDCORP_CHECK_SKIPPED ?: ''
+    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · 빌드 ${where}" + (skipped ? " · ${skipped}" : '')
     echo "== 빌드 노드: ${where} (${env.NODE_NAME})"
     String script = "${pwd(tmp: true)}/sandcorp-build-image.sh"
     writeFile file: script, text: libraryResource('sandcorp/build-image.sh')
-    withCredentials([
-        string(credentialsId: Nodes.GHCR_PUSH_CREDENTIALS, variable: 'GHCR_TOKEN'),
-        sshUserPrivateKey(credentialsId: Nodes.GIT_SSH_CREDENTIALS, keyFileVariable: 'GIT_SSH_KEY')
-    ]) {
-        if (cfg.check) {
-            // 검사가 실패하면 이미지를 굽지 않고, 배포도 하지 않는다(GitHub 무료 요금제라 병합을 막지 못해 여기서 막는다).
-            stage('검사') {
-                withEnv(["SANDCORP_BUILT_ON=${where}"]) { sh cfg.check }
-            }
-        }
+    Closure images = {
         for (Map im in cfg.images) {
             withEnv([
                 "IMAGE_REPO=${im.repo}", "IMAGE_SHA=${env.DEPLOY_SHA}", "BUILT_ON=${where}",
@@ -191,6 +242,27 @@ void buildHere(Map cfg, String where) {
             ]) {
                 sh "bash '${script}'"
             }
+        }
+    }
+    withCredentials([
+        string(credentialsId: Nodes.GHCR_PUSH_CREDENTIALS, variable: 'GHCR_TOKEN'),
+        sshUserPrivateKey(credentialsId: Nodes.GIT_SSH_CREDENTIALS, keyFileVariable: 'GIT_SSH_KEY')
+    ]) {
+        if (!cfg.check) {
+            images()
+        } else if (skipped) {
+            stage('검사') { echo "== 검사 생략: ${skipped}" }
+            images()
+        } else {
+            parallel(
+                failFast: true,
+                '검사': {
+                    stage('검사') {
+                        withEnv(["SANDCORP_BUILT_ON=${where}"]) { sh cfg.check }
+                    }
+                },
+                '이미지 굽기': images,
+            )
         }
     }
 }

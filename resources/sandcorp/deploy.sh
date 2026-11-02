@@ -25,7 +25,7 @@
 #   DEPLOY_HEALTH_CMD        주 서비스 컨테이너 안에서 돌릴 헬스 명령(sh -c)
 #   DEPLOY_HEALTH_URL        배포 노드에서 curl 로 볼 주소(둘 다 있으면 둘 다 본다)
 #   DEPLOY_HEALTH_TRIES      헬스 확인 시도 횟수(기본 3, DEPLOY_SLEEP*2 초 간격)
-#   DEPLOY_HEALTHY_TRIES     healthy 대기 횟수(기본 60)
+#   DEPLOY_HEALTHY_TRIES     healthy 대기 횟수(기본 120, 1초 간격 — healthcheck start_interval 2s 를 놓치지 않게)
 #   DEPLOY_SLEEP             대기 간격 초(기본 2, 시험에서 0)
 #   DEPLOY_KEEP_IMAGES       저장소마다 남길 이미지 수(기본 3)
 set -euo pipefail
@@ -34,6 +34,8 @@ set -euo pipefail
 : "${DEPLOY_IMAGES:?DEPLOY_IMAGES 가 없다}"
 svc="${DEPLOY_SERVICE:-web}"
 nap="${DEPLOY_SLEEP:-2}"
+# healthy 대기는 1초(DEPLOY_SLEEP 이 더 작으면 그것). 2초면 start_interval 2s 와 엇갈려 한 번씩 늦게 본다.
+healthy_nap=$(( nap < 1 ? nap : 1 ))
 
 if [ ! -f .env ]; then
   echo "워크스페이스에 .env가 없다. .env.example을 보고 만들어 두어야 한다." >&2
@@ -61,14 +63,14 @@ pull_images() {
 
 wait_healthy() {
   local i id status
-  for i in $(seq 1 "${DEPLOY_HEALTHY_TRIES:-60}"); do
+  for i in $(seq 1 "${DEPLOY_HEALTHY_TRIES:-120}"); do
     id=$(compose ps -q "$svc" || true)
     status=$(docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null || echo starting)
     if [ "$status" = "healthy" ]; then
       echo "$svc healthy (${i}회째)"
       return 0
     fi
-    sleep "$nap"
+    sleep "$healthy_nap"
   done
   echo "$svc가 healthy가 되지 않았다" >&2
   compose logs --tail 80 "$svc" >&2 || true

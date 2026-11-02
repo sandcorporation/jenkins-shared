@@ -53,7 +53,8 @@ sandcorpDeploy(
 | `sourceUrl` | 빈 값 | `org.opencontainers.image.source` 레이블 |
 | `buildSsh` | `false` | 빌드 노드에서 `github-farrar142` 키를 임시 ssh-agent에 넣고 `--ssh default`(비공개 git 의존성) |
 | `builder` | `<composeProject>-images` | buildx 빌더(docker-container) 이름 |
-| `check` | 빈 값 | 배포 전 검사 명령. 빌드 노드에서 체크아웃 뒤·이미지 빌드 전에 돈다. 실패하면 굽지도 배포하지도 않는다. `GIT_SSH_KEY`·`GHCR_TOKEN`·`SANDCORP_BUILT_ON`이 있다. 검사가 이미지 빌드 안에서 끝나는 저장소는 비운다 |
+| `check` | 빈 값 | 배포 전 검사 명령. 빌드 노드에서 체크아웃 뒤 이미지 빌드와 나란히 돈다. 실패하면 빌드를 끊고 배포하지 않는다(ghcr에 `<repo>:<sha>`가 먼저 올라가 있을 수는 있다). PR 검사가 같은 트리를 통과시켰으면 건너뛴다(아래 「재검사 생략」). `GIT_SSH_KEY`·`GHCR_TOKEN`·`SANDCORP_BUILT_ON`이 있다. 검사가 이미지 빌드 안에서 끝나는 저장소는 비운다 |
+| `skipCheckedTree` | `true` | `false`면 PR 검사 결과와 상관없이 늘 재검사 |
 | `branch` | `main` | 배포 브랜치 |
 | `composeFiles` | `['docker-compose.prod.yml']` | `COMPOSE_FILE`(`:`로 잇는다) |
 | `deployDir` | 잡 워크스페이스 | oracle에서 배포할 디렉터리(`ws()`). 운영 `.env`가 있어야 한다 |
@@ -78,9 +79,21 @@ sandcorpDeploy(
    - main sha가 **직전 성공 빌드의 main sha**와 같으면 → `NOT_BUILT`, 디스코드 알림 없음(작업 브랜치 push, 배포 중에 쌓인 같은 sha 빌드).
    - push가 깨운 빌드인데 main sha가 **배포까지 갔다 실패한 가장 최근 빌드**의 sha와 같으면 → `NOT_BUILT`(깨진 커밋이 브랜치 push마다 배포·자동 롤백을 되풀이하지 않게). 「Build Now」는 다시 시도한다.
    - `ROLLBACK_SHA`가 있으면 언제나 배포.
-2. **이미지 빌드**: `BUILDER=auto`면 `Nodes.MAC_BUILD`를 `MAC_WAIT_SECONDS` 기다리고, 못 잡으면 `Nodes.HOME_BUILD`. 넘어가는 건 노드를 못 잡았을 때뿐이다(실행기를 잡은 뒤의 실패는 실패). 그 노드에서 배포할 sha를 체크아웃 → `check` → 이미지마다 `build-image.sh`(`<repo>:<sha>` 한 태그, 캐시 `<repo>-buildcache:<arch>`).
+   - 배포하기로 했고 `check`가 있으면 **재검사 생략**을 판정한다(아래).
+2. **이미지 빌드**: `BUILDER=auto`면 `Nodes.MAC_BUILD`를 `MAC_WAIT_SECONDS` 기다리고, 못 잡으면 `Nodes.HOME_BUILD`. 넘어가는 건 노드를 못 잡았을 때뿐이다(실행기를 잡은 뒤의 실패는 실패). 그 노드에서 배포할 sha를 체크아웃 → `check`와 이미지마다 `build-image.sh`(`<repo>:<sha>` 한 태그, 캐시 `<repo>-buildcache:<arch>`)를 나란히(`failFast`). 재검사를 생략하면 `검사` 단계에 근거 한 줄만 찍고 굽기만 한다.
 3. **배포**(`Nodes.DEPLOY`): 배포할 sha를 체크아웃(compose 파일이 그 sha 것), `deploy.sh`: pull → `preServices` → `dbCheck` → `migrate` → 주 서비스 교체 → healthy 대기 → `keepServices`·`extraServices` → 헬스 확인 → 옛 이미지 정리.
 4. **디스코드**(`discord-deploy-webhook`, URL은 찍지 않는다): ✅ 성공 · ❌ 실패 · ↩️ 자동 롤백(새 sha·되돌린 sha) · 🚨 자동 롤백도 실패 · 되돌리기 결과. 알림 실패는 빌드 결과를 바꾸지 않는다.
+
+### 재검사 생략
+
+main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 이미 본 트리라고 **증명할 수 있을 때만** 배포 전 `check`를 건너뛴다(`kr.sandcorp.ci.PrCheckSkip`, 값은 gate가 built-in에서 GitHub REST로 모은다 — 자격 `Nodes.GITHUB_API_CREDENTIALS`).
+
+1. `commits/M/pulls`에서 M을 `merge_commit_sha`로 낸, 배포 브랜치로 병합된 PR이 정확히 하나.
+2. 그 PR head H의 `pr-merge` 상태(문맥마다 최신)가 `success`.
+3. `compare/P...H`의 `behind_by == 0` — 병합 직전 main P가 H의 조상. PR 검사는 H를 그때의 main B(⊆ P)에 머지해 보는데, B가 H의 조상이면 머지 결과가 H 그대로라 검사한 트리 = tree(H).
+4. `tree(M) == tree(H)`(squash·merge 커밋 모두).
+
+하나라도 어긋나거나 API가 실패하면 재검사한다. 생략하면 콘솔(`== PR #N 검사 통과(tree … 같음)로 생략`)과 빌드 설명에 남는다. PR 검사 잡의 PR 항목은 병합 뒤 사라지므로 Jenkins 기록이 아니라 GitHub 상태로 본다. 배포 `check`와 `Jenkinsfile.pr`의 `check`가 같은 명령이어야 이 생략이 맞다 — 다르게 둘 저장소는 `skipCheckedTree: false`.
 
 ### 자동 롤백
 
@@ -192,5 +205,5 @@ null 불가 새 열은 둘 중 하나로 고친다.
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) ② `tests/DeployGateTest.groovy`(배포할지 판단) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.

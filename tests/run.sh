@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 이 저장소의 시험 전부. Jenkins 없이 돈다(도커만 있으면 된다).
 #   bash tests/run.sh
-#   1) deploy.sh 성공·자동 롤백 경로(가짜 docker)   2) DeployGate 시험(groovy)
+#   1) deploy.sh 성공·자동 롤백 경로(가짜 docker)   2) DeployGate·PrCheckSkip 시험(groovy)
 #   3) Groovy 전부 컴파일(문법 검사)                  4) shellcheck
 #   5) 파괴적 migrate 판정(python:3.9 — 맥 노드 python3 호환) · 새 migration 고르기(git)
 set -euo pipefail
@@ -14,7 +14,7 @@ PYTHON_IMAGE="${PYTHON_IMAGE:-python:3.9-slim}"
 echo "== 1) deploy.sh"
 bash tests/deploy_test.sh
 
-echo "== 2) DeployGate · 3) Groovy 컴파일"
+echo "== 2) DeployGate·PrCheckSkip · 3) Groovy 컴파일"
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:ro" -w /src "$GROOVY_IMAGE" sh -c '
   set -e
   out=$(mktemp -d)
@@ -22,6 +22,7 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:ro" -w /src "
   for f in vars/*.groovy; do groovyc -cp "$out" -d "$out" "$f"; done
   echo "컴파일 통과: $(ls src/kr/sandcorp/ci/*.groovy vars/*.groovy | wc -l)개"
   groovy -cp "$out" tests/DeployGateTest.groovy
+  groovy -cp "$out" tests/PrCheckSkipTest.groovy
 '
 
 echo "== 4) shellcheck"
