@@ -23,6 +23,8 @@ class Nodes implements Serializable {
     static final String GHCR_PUSH_CREDENTIALS = 'ghcr-push-token'
     /** 비공개 git 의존성용 SSH 키(sshUserPrivateKey). */
     static final String GIT_SSH_CREDENTIALS = 'github-farrar142'
+    /** GitHub REST 읽기(Username with password, 비밀번호 = 토큰). PR 검사 잡의 스캔 자격과 같은 것 — 재검사 생략 판정이 쓴다. */
+    static final String GITHUB_API_CREDENTIALS = 'github-sandcorporation-token'
     /** 디스코드 배포 알림 웹훅(Secret text). URL 은 로그에 찍지 않는다. */
     static final String DISCORD_CREDENTIALS = 'discord-deploy-webhook'
 }
