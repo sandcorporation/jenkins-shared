@@ -10,8 +10,9 @@
 #   PLATFORM       기본 linux/arm64       BUILDER_NAME   buildx 빌더 이름(docker-container 드라이버, 없으면 만든다)
 #   SOURCE_URL     org.opencontainers.image.source 레이블
 #   USE_SSH        1 이면 GIT_SSH_KEY 를 임시 ssh-agent 에 넣고 `--ssh default` 로 넘긴다(비공개 git 의존성)
+#   CACHE_REF      빌드 캐시 레지스트리 주소. 비면 <repo>-buildcache:<arch>
 #   GHCR_TOKEN     ghcr 쓰기 토큰. 노드의 docker 설정은 건드리지 않고 임시 DOCKER_CONFIG 에만 적는다
-# 결과: <repo>:<sha> 한 태그. 빌드 캐시는 <repo>-buildcache:<arch>(레지스트리, mode=max) — 노드끼리 공유한다.
+# 결과: <repo>:<sha> 한 태그. 빌드 캐시는 CACHE_REF, 기본 <repo>-buildcache:<arch>(레지스트리, mode=max) — 노드끼리 공유한다.
 # bash 3.2(macos 노드)에서도 돈다. 토큰·키 경로·내용은 찍지 않는다.
 set -euo pipefail
 
@@ -84,7 +85,7 @@ labels=(--label "org.opencontainers.image.revision=$IMAGE_SHA")
 if [ -n "${SOURCE_URL:-}" ]; then labels+=(--label "org.opencontainers.image.source=$SOURCE_URL"); fi
 
 echo "빌드 노드 ${BUILT_ON:-?} · $platform · $IMAGE_REPO:$IMAGE_SHA ($dockerfile, 문맥 $context)"
-cache="$IMAGE_REPO-buildcache:$arch"
+cache="${CACHE_REF:-$IMAGE_REPO-buildcache:$arch}"
 # bash 3.2 + set -u 에서 빈 배열 "${a[@]}" 는 unbound 오류다 — ${a[@]+...} 로 감싼다.
 docker buildx build --builder "$builder" --platform "$platform" --provenance=false --push \
   ${ssh_args[@]+"${ssh_args[@]}"} \

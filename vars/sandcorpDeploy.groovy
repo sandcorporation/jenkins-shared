@@ -75,7 +75,7 @@ Map normalize(Map a) {
     images = images.collect { Map im ->
         if (!im.repo || !im.envVar) { error("sandcorpDeploy: images 항목마다 repo·envVar 가 있어야 한다: ${im}") }
         [repo: im.repo, envVar: im.envVar, dockerfile: im.dockerfile ?: 'Dockerfile', context: im.context ?: '.',
-         platform: im.platform ?: a.platform ?: 'linux/arm64']
+         platform: im.platform ?: a.platform ?: 'linux/arm64', cache: im.cache ?: '']
     }
     return [
         name          : a.name,
@@ -239,6 +239,7 @@ void buildHere(Map cfg, String where) {
                 "IMAGE_REPO=${im.repo}", "IMAGE_SHA=${env.DEPLOY_SHA}", "BUILT_ON=${where}",
                 "DOCKERFILE=${im.dockerfile}", "BUILD_CONTEXT=${im.context}", "PLATFORM=${im.platform}",
                 "BUILDER_NAME=${cfg.builder}", "SOURCE_URL=${cfg.sourceUrl}", "USE_SSH=${cfg.buildSsh ? '1' : '0'}",
+                "CACHE_REF=${im.cache}",
             ]) {
                 sh "bash '${script}'"
             }
@@ -309,6 +310,7 @@ void deployHere(Map cfg) {
     withEnv(common + imageVars + [
         "DEPLOY_IMAGES=${imagesAt(cfg, env.DEPLOY_SHA)}",
         "DEPLOY_PREVIOUS_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}",
+        "SANDCORP_IMAGE_SHA=${env.DEPLOY_SHA}",
         'SANDCORP_ROLLBACK=0',
     ]) {
         rc = sh(script: "bash '${script}'", returnStatus: true)
@@ -318,7 +320,8 @@ void deployHere(Map cfg) {
         echo "== 배포 실패(${rc}) — 직전 이미지 ${DeployGate.short12(env.SANDCORP_PREVIOUS_SHA)} 로 자동 롤백"
         List prevVars = cfg.images.collect { "${it.envVar}=${it.repo}:${env.SANDCORP_PREVIOUS_SHA}" }
         int rc2
-        withEnv(common + prevVars + ["DEPLOY_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}", 'DEPLOY_PREVIOUS_IMAGES=', 'SANDCORP_ROLLBACK=1']) {
+        withEnv(common + prevVars + ["DEPLOY_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}", 'DEPLOY_PREVIOUS_IMAGES=',
+                 "SANDCORP_IMAGE_SHA=${env.SANDCORP_PREVIOUS_SHA}", 'SANDCORP_ROLLBACK=1']) {
             rc2 = sh(script: "bash '${script}'", returnStatus: true)
         }
         rc = rc2 == 0 ? 3 : 4
