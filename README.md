@@ -5,9 +5,13 @@ Sandcorp Jenkins 공용 라이브러리(빌드·배포·자동 롤백). Jenkins 
 
 ```
 vars/sandcorpDeploy.groovy        main 배포 파이프라인(선언형). 저장소 Jenkinsfile이 부르는 것
+vars/sandcorpPrCheck.groovy       PR 검사 파이프라인. 저장소 Jenkinsfile.pr이 부르는 것(멀티브랜치 잡)
+vars/sandcorpBuildNode.groovy     빌드 노드 고르기(macos 먼저, 못 잡으면 home) — 배포·PR 검사가 같이 쓴다
 src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·자격 ID·mac 대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
 resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시·임시 DOCKER_CONFIG·--ssh default)
+resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
+resources/sandcorp/migrate-guard.py  파괴적 migration 판정(표준 라이브러리만, python 3.8+)
 resources/sandcorp/deploy.sh      oracle에서 pull→DB 확인→migrate→교체→healthy→헬스, 실패하면 자동 롤백
 tests/                            Jenkins 없이 도는 시험(bash tests/run.sh)
 ```
@@ -90,7 +94,7 @@ sandcorpDeploy(
 | 3 | 교체 뒤 실패 → 직전 이미지로 되돌렸고 헬스 통과 | FAILURE + ↩️ 알림 |
 | 4 | 되돌리기도 실패 — 운영이 내려가 있을 수 있다 | FAILURE + 🚨 알림 |
 
-- **migrate는 되돌리지 않는다.** 옛 코드가 새 스키마와 호환돼야 한다(파괴적 migrate는 PR 검사가 막는다 — 별도 티켓).
+- **migrate는 되돌리지 않는다.** 옛 코드가 새 스키마와 호환돼야 한다(파괴적 migrate는 PR 검사가 막는다 — 아래 「파괴적 migrate 검사」).
 - 자동 롤백 경로는 운영에서 일부러 깨뜨려 시험하지 않는다. `tests/deploy_test.sh`가 가짜 docker로 헬스 실패·unhealthy·롤백 실패·직전 없음·migrate 실패·pull 실패를 돌린다.
 - 자동 롤백한 빌드는 FAILURE라 다음 빌드의 「직전 성공」은 여전히 되돌린 그 sha다.
 
@@ -102,9 +106,78 @@ sandcorpDeploy(
 
 라이브러리 순서로 안 되는 저장소(daypage: backend 두 대 롤링·Caddy reload)는 `deployScript: 'deploy/deploy.sh'`. 라이브러리는 이미지 변수(`images[].envVar`)와 `COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`·`DEPLOY_IMAGES`·`SANDCORP_ROLLBACK=0`을 넘겨 부른다. 0이 아니면 직전 성공 sha 이미지로 **같은 스크립트를 `SANDCORP_ROLLBACK=1`로 한 번 더** 부른다 — 스크립트는 그때 migrate를 건너뛰어야 한다. 단계를 구분하지 못하므로 교체 전 실패에도 되돌리기를 한 번 돈다(옛 이미지를 다시 올릴 뿐이다).
 
+## PR 검사(`sandcorpPrCheck`)
+
+PR이 열리거나 push되면 Jenkins가 빌드 노드에서 **PR 머지 결과**(PR head를 main에 합친 것)를 받아 ① 파괴적 migrate 검사 ② 저장소 검사(`check`)를 돌린다.
+결과는 github-branch-source가 **PR head 커밋 상태** `continuous-integration/jenkins/pr-merge`(대기 → success/failure, 링크는 빌드)로 올린다.
+작업자는 `wait-ci.py <PR>`(dev-kit issue-track)로 그 상태를 기다리고 SUCCESS일 때만 병합한다 — wait-ci.py는 커밋 상태(StatusContext)와 check-runs를 함께 읽고, 빨강이면 링크의 Jenkins 콘솔에서 실패 줄을 뽑는다.
+조직이 GitHub 무료 요금제라 보호 규칙으로 병합을 막지는 못한다. 강제는 두 겹: 작업자 규칙(wait-ci.py 통과 뒤 병합) + 배포 잡의 배포 전 `check`.
+
+저장소에 `Jenkinsfile.pr`:
+
+```groovy
+@Library('sandcorp') _
+
+sandcorpPrCheck(
+  name: 'Sandcorp',
+  check: 'bash scripts/ci/check.sh',   // 배포 잡의 check와 같은 것(운영 빌드 포함)
+  buildSsh: true,                      // check가 비공개 git 의존성을 받으면(GIT_SSH_KEY)
+)
+```
+
+| 인자 | 기본 | 뜻 |
+|---|---|---|
+| `check` | (필수) | 검사 명령. 빌드 노드에서 PR 머지 결과를 체크아웃한 뒤 돈다. `SANDCORP_BUILT_ON`(macos/home)·`SANDCORP_PR_CHECK=1`, `buildSsh`면 `GIT_SSH_KEY` |
+| `name` | 빈 값 | 표시용 |
+| `buildSsh` | `false` | `github-farrar142` 키 파일을 `GIT_SSH_KEY`로 넘긴다(ssh-agent는 check가 띄운다) |
+| `migrationGuard` | `true` | 파괴적 migrate 검사. Django가 아닌 저장소도 켜 둬도 된다(새 migration이 없으면 통과) |
+| `target` | `main` | `CHANGE_TARGET`이 없을 때의 기준 브랜치 |
+| `macWaitSeconds` | `Nodes.MAC_WAIT_SECONDS`(180) | 배포와 같은 노드 규칙(`sandcorpBuildNode`) |
+| `timeoutMinutes` | `60` | 빌드 시간 제한 |
+
+같은 PR에 새 push가 오면 돌던 빌드를 끊는다(`disableConcurrentBuilds(abortPrevious: true)`). 잡 파라미터 `BUILDER`·`MAC_WAIT_SECONDS`(첫 빌드 뒤 등록).
+
+### 잡
+
+저장소마다 **PR만 발견하는 멀티브랜치 잡** 하나(본보기: `codemit/ci-pr`). 이름은 `<배포 잡>-pr`(예: `sandcorp-portfolio-pr`).
+
+- 소스 GitHub(`github-sandcorporation-token`), 발견: **원본 저장소 PR — 머지 결과**(`OriginPullRequestDiscoveryTrait` strategyId 1)만. 브랜치 발견은 없다(main은 배포 잡 몫).
+- refspec에 `+refs/heads/main:refs/remotes/@{remote}/main`을 더한다 — 파괴적 migrate 검사가 `origin/main..HEAD`로 PR이 더한 파일을 가른다(없으면 머지 커밋의 첫 부모로 대신한다).
+- Script Path `Jenkinsfile.pr`. 닫힌 PR 항목은 지우고(돌던 빌드도 끊음), 주기 스캔은 웹훅이 빠졌을 때의 그물(1시간).
+- GitHub 웹훅(`/github-webhook/`)에 **Pull requests** 이벤트가 있어야 PR 열기·push에 바로 돈다.
+- 상태 보고는 소스의 기본 동작이라 따로 설정하지 않는다(토큰에 `repo:status` 권한).
+
+## 파괴적 migrate 검사
+
+배포는 **옛 서비스가 도는 동안** migrate하고, 헬스가 실패하면 옛 이미지로 자동 롤백한다(migrate는 되돌리지 않는다). 그래서 새 스키마는 옛 코드가 그대로 읽고 쓸 수 있어야 한다.
+PR 검사의 「파괴적 migrate」 단계가 PR이 **새로 더한** `*/migrations/*.py`(기준 `origin/main..HEAD`, 추가된 파일만 — 이미 있던 파일 수정은 보지 않는다)를 읽어(파이썬 `ast`, Django를 띄우지 않는다) 아래가 있으면 실패시킨다.
+
+| 연산 | 왜 |
+|---|---|
+| `RemoveField` · `DeleteModel` | 옛 코드가 아직 그 열·표를 읽는다 |
+| `RenameField` · `RenameModel` | 옛 코드는 옛 이름을 읽는다 |
+| `AlterField`로 null 가능 → 불가 | 옛 코드가 NULL을 넣는다. 같은 앱의 앞 migration(이름순)에서 이전 정의를 따라간다 — 못 찾으면 실패로 본다 |
+| `RunSQL`의 `DROP`·`RENAME`(SQL 주석 밖) | 옛 코드가 지운·바뀐 것을 읽는다. 변수·f-string처럼 글자 그대로가 아닌 SQL은 실패로 본다. `reverse_sql`은 보지 않는다 |
+
+`SeparateDatabaseAndState`는 `database_operations`만 본다. **경고만**(실패 아님): `AddField`가 null 불가인데 `db_default`가 없음 — 롤백된 옛 코드의 INSERT가 그 열을 몰라 실패한다. 새 필드는 `null=True`나 `db_default`로 더하는 게 안전하다.
+
+### 통과 표시와 expand/contract
+
+열·표를 지우거나 바꾸는 일은 **두 번의 배포**로 나눈다.
+
+1. **expand**: 코드에서 그 열·표를 안 쓰게 하는 PR(필요하면 새 열을 null 가능·`db_default`로 더한다). 배포한다. 이 상태로 자동 롤백돼도 옛 코드와 새 스키마가 맞는다.
+2. **contract**: 그 배포가 **끝난 뒤의** PR에서 지우기·바꾸기 migration을 만들고, 파일에 한 줄을 단다.
+
+```python
+# sandcorp: destructive-ok — post.old 읽기는 #12 배포(2026-11-01)에서 걷어냈다
+```
+
+이 표시의 뜻은 **「이 migration이 지우는 것을 코드에서 이미 안 쓰게 한 배포가 끝났다」**이다(contract 단계라는 선언). 이유는 필수다(구분자 `—`·`-`·`:`; 이유가 없으면 통과하지 않는다). 표시가 있으면 그 파일 전체가 통과하고 로그에 이유가 찍힌다.
+로컬에서 미리 보기: `bash <jenkins-shared>/resources/sandcorp/migrate-guard.sh origin/main`(대상 저장소 루트에서).
+
 ## 노드 라벨 바꾸는 곳
 
-`src/kr/sandcorp/ci/Nodes.groovy` 하나뿐이다(`MAC_BUILD`·`HOME_BUILD`·`DEPLOY`·`CONTROLLER`, 자격 ID, mac 대기 기본값).
+`src/kr/sandcorp/ci/Nodes.groovy` 하나뿐이다(배포와 PR 검사가 같이 쓴다)(`MAC_BUILD`·`HOME_BUILD`·`DEPLOY`·`CONTROLLER`, 자격 ID, mac 대기 기본값).
 예: `laurio-staging` 라벨을 지우려면 먼저 `HOME_BUILD = 'built-in'`으로 바꿔 main에 병합한다 — 이 라이브러리를 쓰는 모든 저장소의 다음 빌드부터 바뀐다.
 
 ## 시험
@@ -113,5 +186,5 @@ sandcorpDeploy(
 bash tests/run.sh
 ```
 
-도커만 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) ② `tests/DeployGateTest.groovy`(배포할지 판단) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck. GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) ② `tests/DeployGateTest.groovy`(배포할지 판단) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
