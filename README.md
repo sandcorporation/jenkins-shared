@@ -9,7 +9,7 @@ vars/sandcorpPrCheck.groovy       PR 검사 파이프라인. 저장소 Jenkinsfi
 vars/sandcorpBuildNode.groovy     빌드 노드 고르기(macos 먼저, 못 잡으면 home) — 배포·PR 검사가 같이 쓴다
 src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·자격 ID·mac 대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
-resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시·임시 DOCKER_CONFIG·--ssh default)
+resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시(CACHE_REF)·임시 DOCKER_CONFIG·--ssh default)
 resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
 resources/sandcorp/migrate-guard.py  파괴적 migration 판정(표준 라이브러리만, python 3.8+)
 resources/sandcorp/deploy.sh      oracle에서 pull→DB 확인→migrate→교체→healthy→헬스, 실패하면 자동 롤백
@@ -48,7 +48,7 @@ sandcorpDeploy(
 | `name` | (필수) | 디스코드 말머리 `[name]` |
 | `composeProject` | (필수) | `COMPOSE_PROJECT_NAME`. buildx 빌더 이름 기본값 `<composeProject>-images`에도 쓴다 |
 | `image` + `imageVar` | — | 이미지 하나: ghcr 저장소와 compose가 읽는 변수 이름 |
-| `images` | — | 이미지 여럿(daypage): `[[repo:, envVar:, dockerfile: 'Dockerfile', context: '.', platform:], ...]`. `image`와 둘 중 하나 |
+| `images` | — | 이미지 여럿(daypage·sandcorp-flow): `[[repo:, envVar:, dockerfile: 'Dockerfile', context: '.', platform:, cache:], ...]`. `image`와 둘 중 하나. `cache`는 빌드 캐시 레지스트리 주소(기본 `<repo>-buildcache:<arch>`) — 전환 전 캐시를 그대로 쓰려는 저장소만 준다 |
 | `platform` | `linux/arm64` | 모든 이미지의 기본 플랫폼(항목마다 덮어쓰기) |
 | `sourceUrl` | 빈 값 | `org.opencontainers.image.source` 레이블 |
 | `buildSsh` | `false` | 빌드 노드에서 `github-farrar142` 키를 임시 ssh-agent에 넣고 `--ssh default`(비공개 git 의존성) |
@@ -117,7 +117,7 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 
 ### 저장소 배포 스크립트(`deployScript`)
 
-라이브러리 순서로 안 되는 저장소(daypage: backend 두 대 롤링·Caddy reload)는 `deployScript: 'deploy/deploy.sh'`. 라이브러리는 이미지 변수(`images[].envVar`)와 `COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`·`DEPLOY_IMAGES`·`SANDCORP_ROLLBACK=0`을 넘겨 부른다. 0이 아니면 직전 성공 sha 이미지로 **같은 스크립트를 `SANDCORP_ROLLBACK=1`로 한 번 더** 부른다 — 스크립트는 그때 migrate를 건너뛰어야 한다. 단계를 구분하지 못하므로 교체 전 실패에도 되돌리기를 한 번 돈다(옛 이미지를 다시 올릴 뿐이다).
+라이브러리 순서로 안 되는 저장소(daypage: backend 두 대 롤링·Caddy reload)는 `deployScript: 'deploy/deploy.sh'`. 라이브러리는 이미지 변수(`images[].envVar`)와 `COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`·`DEPLOY_IMAGES`·`SANDCORP_IMAGE_SHA`(이번에 올릴 이미지 태그 = 커밋 sha)·`SANDCORP_ROLLBACK=0`을 넘겨 부른다. compose가 이미지 태그 하나(`${IMAGE_TAG}`)로 여러 이미지를 고정하는 저장소(sandcorp-flow)는 `SANDCORP_IMAGE_SHA`를 쓴다. 0이 아니면 직전 성공 sha 이미지로(`SANDCORP_IMAGE_SHA`도 그 sha) **같은 스크립트를 `SANDCORP_ROLLBACK=1`로 한 번 더** 부른다 — 스크립트는 그때 migrate를 건너뛰어야 한다. 단계를 구분하지 못하므로 교체 전 실패에도 되돌리기를 한 번 돈다(옛 이미지를 다시 올릴 뿐이다).
 
 ## PR 검사(`sandcorpPrCheck`)
 
@@ -205,5 +205,5 @@ null 불가 새 열은 둘 중 하나로 고친다.
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
