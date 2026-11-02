@@ -3,7 +3,7 @@ import kr.sandcorp.ci.Nodes
 /**
  * PR 검사 파이프라인 — 저장소 Jenkinsfile.pr 은 이것 한 번만 부른다. 잡은 PR 만 발견하는 멀티브랜치(README 「PR 검사」).
  *
- *   빌드 노드(macos, 못 잡으면 home)에서 PR 머지 결과 체크아웃 → 파괴적 migrate 검사 → check
+ *   빌드 노드(home 먼저, 못 잡으면 macos — Nodes.PR_CHECK_ORDER. prefer: 'macos' 면 거꾸로)에서 PR 머지 결과 체크아웃 → 파괴적 migrate 검사 → check
  *
  * 결과는 github-branch-source 가 PR head 커밋 상태(continuous-integration/jenkins/pr-merge)로 올린다 —
  * 작업자는 wait-ci.py 로 그것을 기다린 뒤 병합한다. 새 push 가 오면 돌던 빌드는 끊는다.
@@ -22,16 +22,18 @@ def call(Map args) {
         }
 
         parameters {
-            choice(name: 'BUILDER', choices: ['auto', 'macos', 'home'], description: 'auto=macos 먼저, 못 잡으면 home. 시험용으로 강제 선택')
-            string(name: 'MAC_WAIT_SECONDS', defaultValue: "${cfg.macWaitSeconds}", description: 'auto에서 macos 실행기를 기다리는 시간(초). 넘으면 home')
+            choice(name: 'BUILDER', choices: ['auto', 'home', 'macos'], description: "auto=${cfg.order[0]} 먼저, 못 잡으면 ${cfg.order[1]}. 시험용으로 강제 선택")
+            string(name: 'WAIT_SECONDS', defaultValue: "${cfg.waitSeconds}", description: "auto에서 ${cfg.order[0]} 실행기를 기다리는 시간(초). 넘으면 ${cfg.order[1]}")
         }
 
         stages {
             stage('PR 검사') {
                 steps {
                     script {
-                        int waitSec = (params.MAC_WAIT_SECONDS ?: "${cfg.macWaitSeconds}") as int
-                        sandcorpBuildNode(builder: params.BUILDER ?: 'auto', waitSeconds: waitSec) { String where -> checkHere(cfg, where) }
+                        int waitSec = (params.WAIT_SECONDS ?: "${cfg.waitSeconds}") as int
+                        sandcorpBuildNode(builder: params.BUILDER ?: 'auto', order: cfg.order, waitSeconds: waitSec) { String where ->
+                            checkHere(cfg, where)
+                        }
                     }
                 }
             }
@@ -41,13 +43,18 @@ def call(Map args) {
 
 Map normalize(Map a) {
     if (!a.check) { error('sandcorpPrCheck: 인자 check 가 없다 — README.md') }
+    String prefer = a.prefer ?: 'home'
+    if (!(prefer in ['home', 'macos'])) { error("sandcorpPrCheck: prefer 는 home|macos 다(받은 값 '${prefer}')") }
     return [
         name          : a.name ?: '',
         check         : a.check,
         buildSsh      : a.buildSsh ? true : false,
         migrationGuard: a.migrationGuard == null ? true : (a.migrationGuard ? true : false),
         target        : a.target ?: 'main',
-        macWaitSeconds: (a.macWaitSeconds ?: Nodes.MAC_WAIT_SECONDS) as int,
+        // home 먼저(기본) — check 가 home(Jenkins 컨테이너)에서 다 돌지 못하는 저장소만 prefer: 'macos'.
+        order         : prefer == 'home' ? Nodes.PR_CHECK_ORDER : Nodes.DEPLOY_BUILD_ORDER,
+        // 먼저 노드를 기다리는 시간. macWaitSeconds 는 mac 먼저였던 때의 이름이라 그대로 받는다.
+        waitSeconds   : (a.waitSeconds ?: a.macWaitSeconds ?: Nodes.PR_CHECK_WAIT_SECONDS) as int,
         timeoutMinutes: (a.timeoutMinutes ?: 60) as int,
     ]
 }

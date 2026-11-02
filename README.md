@@ -6,8 +6,8 @@ Sandcorp Jenkins 공용 라이브러리(빌드·배포·자동 롤백). Jenkins 
 ```
 vars/sandcorpDeploy.groovy        main 배포 파이프라인(선언형). 저장소 Jenkinsfile이 부르는 것
 vars/sandcorpPrCheck.groovy       PR 검사 파이프라인. 저장소 Jenkinsfile.pr이 부르는 것(멀티브랜치 잡)
-vars/sandcorpBuildNode.groovy     빌드 노드 고르기(macos 먼저, 못 잡으면 home) — 배포·PR 검사가 같이 쓴다
-src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·자격 ID·mac 대기 시간 — 이것들을 적는 유일한 곳
+vars/sandcorpBuildNode.groovy     빌드 노드 고르기(먼저 노드를 기다리고 못 잡으면 다른 노드) — 배포(macos 먼저)·PR 검사(home 먼저)가 같이 쓴다
+src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·노드 순서·자격 ID·대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
 resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시(CACHE_REF)·임시 DOCKER_CONFIG·--ssh default)
 resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
@@ -121,7 +121,7 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 
 ## PR 검사(`sandcorpPrCheck`)
 
-PR이 열리거나 push되면 Jenkins가 빌드 노드에서 **PR 머지 결과**(PR head를 main에 합친 것)를 받아 ① 파괴적 migrate 검사 ② 저장소 검사(`check`)를 돌린다.
+PR이 열리거나 push되면 Jenkins가 빌드 노드(**home 먼저**, `WAIT_SECONDS` 안에 못 잡으면 macos — `Nodes.PR_CHECK_ORDER`)에서 **PR 머지 결과**(PR head를 main에 합친 것)를 받아 ① 파괴적 migrate 검사 ② 저장소 검사(`check`)를 돌린다.
 결과는 github-branch-source가 **PR head 커밋 상태** `continuous-integration/jenkins/pr-merge`(대기 → success/failure, 링크는 빌드)로 올린다.
 작업자는 `wait-ci.py <PR>`(dev-kit issue-track)로 그 상태를 기다리고 SUCCESS일 때만 병합한다 — wait-ci.py는 커밋 상태(StatusContext)와 check-runs를 함께 읽고, 빨강이면 링크의 Jenkins 콘솔에서 실패 줄을 뽑는다.
 조직이 GitHub 무료 요금제라 보호 규칙으로 병합을 막지는 못한다. 강제는 두 겹: 작업자 규칙(wait-ci.py 통과 뒤 병합) + 배포 잡의 배포 전 `check`.
@@ -145,10 +145,16 @@ sandcorpPrCheck(
 | `buildSsh` | `false` | `github-farrar142` 키 파일을 `GIT_SSH_KEY`로 넘긴다(ssh-agent는 check가 띄운다) |
 | `migrationGuard` | `true` | 파괴적 migrate 검사. Django가 아닌 저장소도 켜 둬도 된다(새 migration이 없으면 통과) |
 | `target` | `main` | `CHANGE_TARGET`이 없을 때의 기준 브랜치 |
-| `macWaitSeconds` | `Nodes.MAC_WAIT_SECONDS`(180) | 배포와 같은 노드 규칙(`sandcorpBuildNode`) |
+| `prefer` | `home` | 먼저 기다릴 노드. `macos`면 배포처럼 macos 먼저(아래 「home에서 도는 검사」) |
+| `waitSeconds` | `Nodes.PR_CHECK_WAIT_SECONDS`(180) | 먼저 노드를 기다리는 시간. 옛 이름 `macWaitSeconds`도 받는다 |
 | `timeoutMinutes` | `60` | 빌드 시간 제한 |
 
-같은 PR에 새 push가 오면 돌던 빌드를 끊는다(`disableConcurrentBuilds(abortPrevious: true)`). 잡 파라미터 `BUILDER`·`MAC_WAIT_SECONDS`(첫 빌드 뒤 등록).
+같은 PR에 새 push가 오면 돌던 빌드를 끊는다(`disableConcurrentBuilds(abortPrevious: true)`). 잡 파라미터 `BUILDER`(auto/home/macos)·`WAIT_SECONDS`(첫 빌드 뒤 등록).
+
+### home에서 도는 검사
+
+home은 Jenkins **컨테이너**(built-in 노드)이고 호스트의 docker 소켓을 쓴다. 그래서 `check`가 워크스페이스 경로를 bind mount(`docker run -v "$PWD/…"`, compose의 `./…` volumes)하거나 컨테이너가 띄운 호스트 포트(`localhost:<포트>`)에 붙으면 home에서는 깨진다(호스트에 그 경로가 없다). `docker build`의 빌드 컨텍스트와 `docker exec`·`docker run -i`로 파이프하는 것은 괜찮다.
+`check`가 home에서 일부를 건너뛰어야 하는 저장소(`SANDCORP_BUILT_ON=home` 분기)는 `prefer: 'macos'`로 둔다 — PR 검사가 조용히 줄지 않게. 2026-11-02 기준 sandcorp-flow만 그렇다(nginx 계약 시험·e2e).
 
 ### 잡
 
@@ -196,8 +202,8 @@ null 불가 새 열은 둘 중 하나로 고친다.
 
 ## 노드 라벨 바꾸는 곳
 
-`src/kr/sandcorp/ci/Nodes.groovy` 하나뿐이다(배포와 PR 검사가 같이 쓴다)(`MAC_BUILD`·`HOME_BUILD`·`DEPLOY`·`CONTROLLER`, 자격 ID, mac 대기 기본값).
-예: `laurio-staging` 라벨을 지우려면 먼저 `HOME_BUILD = 'built-in'`으로 바꿔 main에 병합한다 — 이 라이브러리를 쓰는 모든 저장소의 다음 빌드부터 바뀐다.
+`src/kr/sandcorp/ci/Nodes.groovy` 하나뿐이다(배포와 PR 검사가 같이 쓴다)(`MAC_BUILD`·`HOME_BUILD`·`DEPLOY`·`CONTROLLER`, 배포·PR 검사의 노드 순서 `DEPLOY_BUILD_ORDER`·`PR_CHECK_ORDER`, 자격 ID, 대기 기본값).
+main에 병합하면 이 라이브러리를 쓰는 모든 저장소의 다음 빌드부터 바뀐다. `HOME_BUILD`는 `built-in`(예전 `laurio-staging` 라벨은 쓰지 않는다).
 
 ## 시험
 
@@ -205,5 +211,5 @@ null 불가 새 열은 둘 중 하나로 고친다.
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
