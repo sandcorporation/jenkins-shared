@@ -158,8 +158,14 @@ PR 검사의 「파괴적 migrate」 단계가 PR이 **새로 더한** `*/migrat
 | `RenameField` · `RenameModel` | 옛 코드는 옛 이름을 읽는다 |
 | `AlterField`로 null 가능 → 불가 | 옛 코드가 NULL을 넣는다. 같은 앱의 앞 migration(이름순)에서 이전 정의를 따라간다 — 못 찾으면 실패로 본다 |
 | `RunSQL`의 `DROP`·`RENAME`(SQL 주석 밖) | 옛 코드가 지운·바뀐 것을 읽는다. 변수·f-string처럼 글자 그대로가 아닌 SQL은 실패로 본다. `reverse_sql`은 보지 않는다 |
+| `AddField`가 null 불가인데 `db_default`가 없음 | 롤백된 옛 코드의 INSERT가 그 열을 몰라 넣지 않아 실패한다(`default`는 Django 쪽 값이라 DB에 없다). `ManyToManyField`, 이 PR의 새 migration이 `CreateModel`한 모델의 필드는 제외(옛 코드가 그 표를 모른다) |
 
-`SeparateDatabaseAndState`는 `database_operations`만 본다. **경고만**(실패 아님): `AddField`가 null 불가인데 `db_default`가 없음 — 롤백된 옛 코드의 INSERT가 그 열을 몰라 실패한다. 새 필드는 `null=True`나 `db_default`로 더하는 게 안전하다.
+`SeparateDatabaseAndState`는 `database_operations`만 본다.
+
+null 불가 새 열은 둘 중 하나로 고친다.
+
+- **`db_default`를 준다**(Django 5.0+): `models.IntegerField(default=0, db_default=0)`. DB가 기본값을 채우니 옛 코드의 INSERT도 통과한다. 한 번의 배포로 끝난다.
+- **두 번에 나눈다**: 먼저 `null=True`로 더해 배포하고(코드는 값을 채운다), 그 배포가 끝난 뒤의 PR에서 빈 값을 채우고 null 불가로 바꾸는 migration에 통과 표시를 단다(아래). 이때 `AlterField` null 가능 → 불가도 같은 표시로 통과한다.
 
 ### 통과 표시와 expand/contract
 

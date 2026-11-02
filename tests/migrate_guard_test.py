@@ -95,11 +95,30 @@ class Guard(unittest.TestCase):
     def test_alter_field_unknown_prior_fails_closed(self):
         self.assertDestructive("migrations.AlterField(model_name='post', name='title', field=models.CharField(max_length=20)),", "post.title", "찾지 못")
 
-    def test_add_not_null_field_without_db_default_warns_only(self):
-        out = self.assertSafe("migrations.AddField(model_name='post', name='n', field=models.IntegerField(default=0)),")
-        self.assertIn("경고", out)
-        self.assertIn("post.n", out)
-        self.assertIn("db_default", out)
+    def test_add_not_null_field_without_db_default_fails(self):
+        out = self.assertDestructive("migrations.AddField(model_name='post', name='n', field=models.IntegerField(default=0)),", "AddField", "post.n", "db_default")
+        self.assertIn("null=True", out)  # 해결법(먼저 null 허용으로)을 알려 준다
+
+    def test_add_not_null_field_passes_with_mark(self):
+        path = self.write("0002_new.py", migration(
+            "migrations.AddField(model_name='post', name='n', field=models.IntegerField(default=0)),",
+            comment="# sandcorp: destructive-ok — post.n 은 #7 배포에서 null=True 로 먼저 더했다\n",
+        ))
+        code, out = self.run_guard(path)
+        self.assertEqual(code, 0, out)
+
+    def test_add_not_null_field_to_model_created_in_same_pr(self):
+        # 같은 파일에서 만든 표, 이 PR 의 다른 새 migration 에서 만든 표 — 옛 코드는 그 표를 모른다
+        self.assertSafe("""
+            migrations.CreateModel(name='Tag', fields=[('id', models.AutoField(primary_key=True))]),
+            migrations.AddField(model_name='tag', name='post', field=models.ForeignKey(to='app.post', on_delete=models.CASCADE)),
+        """)
+        a = self.write("0003_a.py", migration("migrations.CreateModel(name='Label', fields=[('id', models.AutoField(primary_key=True))]),"))
+        b = self.write("0004_b.py", migration("migrations.AddField(model_name='label', name='n', field=models.IntegerField()),"))
+        code, out = self.run_guard(a, b)
+        self.assertEqual(code, 0, out)
+        code, out = self.run_guard(b)  # 표가 예전부터 있던 것이면(이 PR 이 만든 게 아니면) 실패
+        self.assertEqual(code, 1, out)
 
     def test_run_sql_drop(self):
         self.assertDestructive("migrations.RunSQL('ALTER TABLE post DROP COLUMN old'),", "RunSQL", "DROP")
@@ -136,7 +155,6 @@ class Guard(unittest.TestCase):
             migrations.RunSQL('CREATE INDEX x ON post (a)', reverse_sql='DROP INDEX x ON post'),
             migrations.SeparateDatabaseAndState(state_operations=[migrations.RemoveField(model_name='post', name='z')]),
         """)
-        self.assertNotIn("경고", self.run_guard(os.path.join(self.dir, "0002_new.py"))[1])
 
     def test_alter_field_not_null_to_not_null(self):
         prior = "migrations.AddField(model_name='post', name='title', field=models.CharField(max_length=10, db_default=''))"

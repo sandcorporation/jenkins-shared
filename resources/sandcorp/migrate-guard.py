@@ -9,8 +9,9 @@
   RemoveField · DeleteModel · RenameField · RenameModel           옛 코드가 아직 그 열·표를 읽는다
   AlterField 로 null 가능 → 불가                                  옛 코드가 NULL 을 넣는다(앞 정의를 못 찾으면 실패로 본다)
   RunSQL 의 DROP · RENAME(주석 밖), 글자 그대로가 아닌 SQL           읽을 수 없으면 실패로 본다
+  AddField 가 null 불가인데 db_default 가 없다(ManyToMany 제외)     롤백된 옛 코드의 INSERT 가 그 열을 몰라 실패한다
+                                                                  (이 PR 의 새 migration 이 CreateModel 한 모델은 제외 — 옛 코드는 그 표를 모른다)
   SeparateDatabaseAndState 는 database_operations 만 본다.
-경고만(실패 아님): AddField 가 null 불가인데 db_default 가 없다(ManyToMany 제외) — 옛 코드의 INSERT 가 그 열을 몰라 실패한다.
 
 통과 표시: 파일 어디든 `# sandcorp: destructive-ok — <이유>` 한 줄(이유 필수, 구분자 — · - · :).
 뜻은 「코드에서 이미 안 쓰게 한 배포가 끝났다」(expand/contract 의 contract 단계) — jenkins-shared README.
@@ -23,16 +24,16 @@ import ast
 import os
 import re
 import sys
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 MARK = re.compile(r"^[ \t]*#[ \t]*sandcorp:[ \t]*destructive-ok\b(.*)$", re.MULTILINE)
 MARK_REASON = re.compile(r"^[ \t]*(?:—|–|--?|:)[ \t]*(\S.*)$")
 SQL_BAD = re.compile(r"\b(DROP|RENAME)\b", re.IGNORECASE)
 NO_COLUMN_FIELDS = {"ManyToManyField", "GeneratedField"}
-WARN = "경고: "  # judge 가 이것으로 시작하는 말을 주면 실패가 아니라 경고
 
 DROPPED = object()  # 앞 migration 에서 지운 필드
 FieldState = Dict[Tuple[str, str], object]  # (모델, 필드) 소문자 → 필드 ast.Call 또는 DROPPED
+NewModels = Set[Tuple[str, str]]  # (migrations 폴더, 모델 소문자) — 이 PR 의 새 migration 이 CreateModel 한 것
 
 
 def tail(node: ast.AST) -> str:
@@ -145,7 +146,7 @@ def strip_sql_comments(sql: str) -> str:
     return re.sub(r"--[^\n]*", " ", sql)
 
 
-def judge(op: ast.Call, state: FieldState) -> Optional[str]:
+def judge(op: ast.Call, state: FieldState, new_models: Set[str]) -> Optional[str]:
     kind = tail(op.func)
     if kind == "RemoveField":
         m, f = key(arg(op, 0, "model_name"), arg(op, 1, "name"))
@@ -163,9 +164,12 @@ def judge(op: ast.Call, state: FieldState) -> Optional[str]:
             return None
         m, f = key(arg(op, 0, "model_name"), arg(op, 1, "name"))
         if kind == "AddField":
-            if arg(field, 99, "db_default") is not None:
+            if arg(field, 99, "db_default") is not None or m in new_models:
                 return None
-            return f"{WARN}AddField {m}.{f} null 불가인데 db_default 가 없다 — 롤백된 옛 코드의 INSERT 가 실패한다(db_default 를 주면 사라진다)"
+            return (
+                f"AddField {m}.{f} null 불가인데 db_default 가 없다 — 롤백된 옛 코드의 INSERT 가 그 열을 몰라 실패한다"
+                "(db_default 를 주거나, null=True 로 먼저 더하고 다음 배포에서 null 불가로)"
+            )
         before = state.get((m, f))
         if before is None or before is DROPPED:
             return f"AlterField {m}.{f} null 불가 — 앞 migration 에서 이 필드 정의를 찾지 못해 null 전환인지 모른다"
@@ -204,8 +208,22 @@ def prior_state(path: str) -> FieldState:
     return state
 
 
-def check(path: str) -> Tuple[str, List[str]]:
-    """(판정, 줄들). 판정: ok | mark | bad. 줄 중 WARN 으로 시작하는 것은 경고."""
+def created_models(paths: List[str]) -> NewModels:
+    """새 migration 들이 CreateModel 한 모델. 그 모델에 더하는 필드는 옛 코드가 모르는 표라 null 불가여도 안전하다."""
+    out: NewModels = set()
+    for path in paths:
+        try:
+            tree = parse(path)
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        for op in flat(operations(tree), db_only=True):
+            if tail(op.func) == "CreateModel":
+                out.add((os.path.dirname(os.path.abspath(path)), text(arg(op, 0, "name")).lower()))
+    return out
+
+
+def check(path: str, new_models: Optional[NewModels] = None) -> Tuple[str, List[str]]:
+    """(판정, 줄들). 판정: ok | mark | bad."""
     try:
         with open(path, encoding="utf-8") as f:
             src = f.read()
@@ -218,20 +236,21 @@ def check(path: str) -> Tuple[str, List[str]]:
         return "mark", [reasons[0]]
     state = prior_state(path)
     found: List[str] = []
-    warns: List[str] = []
+    here = os.path.dirname(os.path.abspath(path))
+    mine = {m for (d, m) in (new_models if new_models is not None else created_models([path])) if d == here}
     ops = operations(tree)
     db_ops = set(id(o) for o in flat(ops, db_only=True))
     state_ops = set(id(o) for o in flat(ops, db_only=False))
     for op in _in_order(ops):
         if id(op) in db_ops:
-            why = judge(op, state)
+            why = judge(op, state, mine)
             if why:
-                (warns if why.startswith(WARN) else found).append(f"{path}:{op.lineno} {why[len(WARN):] if why.startswith(WARN) else why}")
+                found.append(f"{path}:{op.lineno} {why}")
         if id(op) in state_ops:
             apply(state, op)
     if found and MARK.search(src):
         found.append(f"{path}: 통과 표시에 이유가 없다 — `# sandcorp: destructive-ok — <이유>`")
-    return ("bad" if found else "ok"), found + [WARN + w for w in warns]
+    return ("bad" if found else "ok"), found
 
 
 def _in_order(ops: List[ast.Call]) -> Iterator[ast.Call]:
@@ -254,8 +273,9 @@ def main(argv: List[str]) -> int:
         return 0
     bad = 0
     print(f"migrate-guard: 새 migration {len(argv)}개")
+    new_models = created_models(argv)
     for path in argv:
-        verdict, lines = check(path)
+        verdict, lines = check(path, new_models)
         if verdict == "mark":
             print(f"  표시  {path} — {lines[0]}")
             continue
@@ -264,11 +284,12 @@ def main(argv: List[str]) -> int:
         else:
             bad += 1
         for line in lines:
-            print(f"  경고  {line[len(WARN):]}" if line.startswith(WARN) else f"  파괴  {line}")
+            print(f"  파괴  {line}")
     if bad:
         print(
             f"파괴적 migration {bad}개 — 옛 코드(자동 롤백 대상)가 새 스키마와 맞지 않는다. expand/contract 두 단계로 나눈다:\n"
             "  1) 코드에서 그 열·표를 안 쓰게 하는 PR 을 배포한다(스키마는 그대로, 새 열은 null 가능·db_default 로).\n"
+            "     null 불가 새 열은 db_default 를 주거나, null=True 로 먼저 더해 배포한 뒤 다음 PR 에서 null 불가로 바꾼다(그때 표시를 단다).\n"
             "  2) 그 배포가 끝난 뒤의 PR 에서 지우기·바꾸기 migration 에 `# sandcorp: destructive-ok — <이유>` 를 단다.\n"
             "  자세히: https://github.com/sandcorporation/jenkins-shared#파괴적-migrate-검사"
         )
