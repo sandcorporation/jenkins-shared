@@ -177,7 +177,7 @@ PR 검사 실패 — 검사 · 0123456789ab · home · 빌드 #42
 
 - 단계 명령은 `sh`와 같게(`sh -xe`) 돌되 출력을 `tee`로 작업 공간 `@tmp/pr-check-{migrate,check}.log`에도 남긴다. 성공하면 그것뿐이다(댓글 없음).
 - 요지(`kr.sandcorp.ci.FailureComment`): 출력 끝 2000줄에서 `FAILED`·`Error`·`error:`·`Traceback`·`AssertionError`·`E   `·`budget`/`예산` 줄과 앞뒤 3줄, 끝 쪽부터 **최대 150줄·60KB**. 뽑을 게 없으면 끝 80줄.
-- 댓글은 저장소를 읽는 누구나 본다. `ghp_`·`github_pat_`·`-----BEGIN`·`password=`·`token=`·`https://discord`가 든 줄과 개인 키 블록(BEGIN…END)은 지운다. PR 검사의 `withCredentials`는 SSH 키 **파일 경로**(`GIT_SSH_KEY`)만 넘기므로 출력에 키 값이 나올 길은 `check`가 키 파일을 찍는 것뿐이고, 그 블록은 지워진다.
+- 댓글은 저장소를 읽는 누구나 본다. `ghp_`·`github_pat_`·`-----BEGIN`·`password=`·`token=`·`https://discord`가 든 줄과 개인 키 블록(BEGIN…END, PGP `… PRIVATE KEY BLOCK`도)은 지운다. 끝 2000줄 경계가 키 블록 가운데에 걸려 BEGIN 없이 END가 먼저 나오면 첫 줄부터 그 END까지 지우고, 지우기는 줄 자르기(2000자)보다 먼저 한다. PR 검사의 `withCredentials`는 SSH 키 **파일 경로**(`GIT_SSH_KEY`)만 넘기므로 출력에 키 값이 나올 길은 `check`가 키 파일을 찍는 것뿐이고, 그 블록은 지워진다.
 - head는 PR head 커밋(머지 결과의 두 번째 부모, 빨리감기면 HEAD) — wait-ci.py가 PR `headRefOid` 앞 12자로 찾는다. 새 push로 다시 실패하면 새 댓글이 붙는다(옛 댓글은 그대로).
 - 자격은 배포의 재검사 판정과 같은 `github-sandcorporation-token`(`Nodes.GITHUB_API_CREDENTIALS`, 멀티브랜치 소스의 그것)으로 `POST /repos/{owner}/{repo}/issues/{N}/comments`. 못 달면(권한·네트워크) 경고만 찍고 빌드 결과는 단계 실패 그대로다.
 
