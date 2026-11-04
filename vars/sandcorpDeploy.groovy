@@ -5,6 +5,7 @@ import kr.sandcorp.ci.DeployStatus
 import kr.sandcorp.ci.FailureComment
 import kr.sandcorp.ci.Nodes
 import kr.sandcorp.ci.PrCheckSkip
+import kr.sandcorp.ci.StepScript
 
 /**
  * main 배포 파이프라인 — 저장소 Jenkinsfile 은 이것 한 번만 부른다. 인자·동작은 README.md.
@@ -448,8 +449,10 @@ void postStatus(String sha, Map st) {
 int runLogged(String stageName, String where, String script, boolean returnStatus) {
     String tmp = pwd(tmp: true)
     String key = ['검사': 'check', '이미지 굽기': 'image', '배포': 'deploy'][stageName] ?: 'step'
-    String cmd = "${tmp}/sandcorp-${key}.sh"
+    // 단계 명령 파일은 실제 스크립트(sandcorp-deploy.sh 등)와 겹치지 않는 이름 — 겹치면 자기 재귀(#19)
+    String cmd = StepScript.path(tmp, 'sandcorp', key)
     String log = "${tmp}/sandcorp-${key}.log"
+    StepScript.guard(cmd, script)
     writeFile file: cmd, text: script
     int rc = sh(returnStatus: true, script: """#!/bin/bash
 sh -xe '${cmd}' 2>&1 | tee '${log}'

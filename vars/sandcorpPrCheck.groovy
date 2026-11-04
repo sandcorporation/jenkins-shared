@@ -2,6 +2,7 @@ import groovy.json.JsonOutput
 import kr.sandcorp.ci.FailureComment
 import kr.sandcorp.ci.Nodes
 import kr.sandcorp.ci.PrCheckSkip
+import kr.sandcorp.ci.StepScript
 
 /**
  * PR 검사 파이프라인 — 저장소 Jenkinsfile.pr 은 이것 한 번만 부른다. 잡은 PR 만 발견하는 멀티브랜치(README 「PR 검사」).
@@ -110,8 +111,9 @@ String baseRev(Map cfg) {
 void runLogged(String stageName, String where, String script) {
     String tmp = pwd(tmp: true)
     String key = stageName == '검사' ? 'check' : 'migrate'
-    String cmd = "${tmp}/pr-check-${key}.sh"
+    String cmd = StepScript.path(tmp, 'pr-check', key)
     String log = "${tmp}/pr-check-${key}.log"
+    StepScript.guard(cmd, script)
     writeFile file: cmd, text: script
     int rc = sh(returnStatus: true, script: """#!/bin/bash
 sh -xe '${cmd}' 2>&1 | tee '${log}'
