@@ -93,7 +93,7 @@ sandcorpDeploy(
 - **커밋 상태** `sandcorp/deploy`, 배포한 main sha에. gate가 배포하기로 하면 `pending`(`빌드 #N · 배포 중`), post always가 `success`/`failure`(`빌드 #N · 성공 · 검사 생략 · 빌드 macos · 2분 3초`, `빌드 #N · 검사 실패 · 빌드 home`, `… 실패 → <sha> 자동 롤백` 등, 140자 안). 중단·시간 초과도 `failure`(`중단(시간 초과 포함)`) — pending으로 남기지 않는다. `target_url`은 비운다(빌드 URL은 내부 주소).
 - **건너뛴 빌드**(NOT_BUILT): 그 main sha에 끝난 상태가 아직 없을 때만 `success`(`건너뜀 · 이미 배포한 sha`) 또는 `failure`(`건너뜀 · 직전 배포가 실패한 sha`). 이미 있으면 덮지 않는다(작업 브랜치 push마다 깨는 빌드가 기록을 지우지 않게). 배포 브랜치가 아닌 빌드는 남기지 않는다.
 - **`ROLLBACK_SHA` 되돌리기**는 상태·댓글을 남기지 않는다(옛 sha의 기록을 덮지 않게).
-- **실패 댓글**: `검사`·`이미지 굽기`·`배포`(첫 실행) 명령을 `sh -xe` 그대로 돌리되 `tee`로 로그를 남기고, 실패하면 배포한 sha를 만든 병합 PR(`commits/<sha>/pulls`, 재검사 판정이 이미 찾았으면 그 PR)에 댓글 하나 — 제목 `배포 실패 — <단계> · <sha 12자> · <노드> · 빌드 #N`, 본문 규칙(실패 줄 앞뒤 3줄·150줄·60KB·비밀값 줄 제거)은 「실패 댓글」과 같고 빌드 URL은 넣지 않는다. PR을 못 찾으면(직접 push) 생략.
+- **실패 댓글**: `검사`·`이미지 굽기`·`배포`(첫 실행) 명령을 `sh -xe` 그대로 돌리되 `tee`로 로그를 남기고, 실패하면 배포한 sha를 만든 병합 PR(`commits/<sha>/pulls`, 재검사 판정이 이미 찾았으면 그 PR)에 댓글 하나 — 제목 `배포 실패 — <단계> · <sha 12자> · <노드> · 빌드 #N`, 본문 규칙(실패 줄 앞뒤 3줄·150줄·60KB·비밀값 줄 제거)은 「실패 댓글」과 같고 빌드 URL은 넣지 않는다. PR을 못 찾으면(직접 push) 생략. 단계 명령은 `@tmp/sandcorp-step-<check|image|deploy>.sh`에 적는다 — 실제 스크립트(`sandcorp-deploy.sh` 등)와 이름이 겹치면 자기를 덮어써 무한 재귀라(2026-11-04 사고, #19) `-step-`을 넣고, 명령이 자기 파일 경로를 담으면 쓰기 전에 멈춘다(`kr.sandcorp.ci.StepScript`).
 - 자격은 `Nodes.GITHUB_API_CREDENTIALS`(`statuses`·`issues` 쓰기). 상태·댓글이 실패하면 경고만 — 배포 결과는 그대로다. 배포 경로에 더해지는 것은 GitHub POST 두 번(시작·끝, 각 `--max-time 10`)과 `tee` 뿐이다.
 - 한 push에 PR 여러 개가 묶이면 끝 커밋만 배포되고 그 앞 병합 커밋에는 상태가 없다. `wait-deploy.py`는 그때 main에서 그 커밋 뒤의 첫 `sandcorp/deploy` 커밋을 본다.
 
@@ -175,7 +175,7 @@ PR 검사 실패 — 검사 · 0123456789ab · home · 빌드 #42
 종료 코드 1 · <빌드 URL>
 ```
 
-- 단계 명령은 `sh`와 같게(`sh -xe`) 돌되 출력을 `tee`로 작업 공간 `@tmp/pr-check-{migrate,check}.log`에도 남긴다. 성공하면 그것뿐이다(댓글 없음).
+- 단계 명령은 `sh`와 같게(`sh -xe`) 돌되 출력을 `tee`로 작업 공간 `@tmp/pr-check-{migrate,check}.log`에도 남긴다(명령 파일은 `@tmp/pr-check-step-<key>.sh`). 성공하면 그것뿐이다(댓글 없음).
 - 요지(`kr.sandcorp.ci.FailureComment`): 출력 끝 2000줄에서 `FAILED`·`Error`·`error:`·`Traceback`·`AssertionError`·`E   `·`budget`/`예산` 줄과 앞뒤 3줄, 끝 쪽부터 **최대 150줄·60KB**. 뽑을 게 없으면 끝 80줄.
 - 댓글은 저장소를 읽는 누구나 본다. `ghp_`·`github_pat_`·`-----BEGIN`·`password=`·`token=`·`https://discord`가 든 줄과 개인 키 블록(BEGIN…END, PGP `… PRIVATE KEY BLOCK`도)은 지운다. 끝 2000줄 경계가 키 블록 가운데에 걸려 BEGIN 없이 END가 먼저 나오면 첫 줄부터 그 END까지 지우고, 지우기는 줄 자르기(2000자)보다 먼저 한다. PR 검사의 `withCredentials`는 SSH 키 **파일 경로**(`GIT_SSH_KEY`)만 넘기므로 출력에 키 값이 나올 길은 `check`가 키 파일을 찍는 것뿐이고, 그 블록은 지워진다.
 - head는 PR head 커밋(머지 결과의 두 번째 부모, 빨리감기면 HEAD) — wait-ci.py가 PR `headRefOid` 앞 12자로 찾는다. 새 push로 다시 실패하면 새 댓글이 붙는다(옛 댓글은 그대로).
