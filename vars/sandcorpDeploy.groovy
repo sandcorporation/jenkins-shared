@@ -1,6 +1,8 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
 import kr.sandcorp.ci.DeployGate
+import kr.sandcorp.ci.DeployStatus
+import kr.sandcorp.ci.FailureComment
 import kr.sandcorp.ci.Nodes
 import kr.sandcorp.ci.PrCheckSkip
 
@@ -8,6 +10,7 @@ import kr.sandcorp.ci.PrCheckSkip
  * main 배포 파이프라인 — 저장소 Jenkinsfile 은 이것 한 번만 부른다. 인자·동작은 README.md.
  *
  *   배포할 커밋 확인(built-in, 재검사 생략 판정) → 이미지 빌드(macos, 못 잡으면 home; 검사와 나란히) → 배포(oracle, 실패하면 자동 롤백) → 디스코드
+ *   main 커밋에 GitHub 커밋 상태 sandcorp/deploy(시작 pending, 끝 success|failure), 실패하면 병합된 PR 에 실패 댓글 — README 「배포 결과(GitHub)」
  */
 def call(Map args) {
     Map cfg = normalize(args)
@@ -54,11 +57,10 @@ def call(Map args) {
         }
 
         post {
-            // 결과 한 줄을 디스코드로. 건너뛴 빌드(NOT_BUILT)는 알리지 않는다. 알림 실패는 빌드 결과를 뒤집지 않는다.
+            // 커밋 상태(sandcorp/deploy)를 끝맺고 결과 한 줄을 디스코드로. 건너뛴 빌드(NOT_BUILT)는 디스코드에 알리지 않는다.
+            // 상태·알림 실패는 빌드 결과를 뒤집지 않는다. 중단·시간 초과에도 always 는 돈다 — pending 으로 남지 않는다.
             always {
-                script {
-                    if (env.SANDCORP_SKIP != 'true') { notifyDiscord(cfg) }
-                }
+                script { finish(cfg) }
             }
         }
     }
@@ -109,20 +111,29 @@ Map normalize(Map a) {
 
 void gate(Map cfg) {
     String rollbackSha = params.ROLLBACK_SHA?.trim() ?: ''
+    Map decision
     node(Nodes.CONTROLLER) {
         def v = checkout scm
         env.SANDCORP_MAIN_SHA = v.GIT_COMMIT
         env.SANDCORP_BRANCH = v.GIT_BRANCH ?: ''
+        env.SANDCORP_DEPLOY_BRANCH = cfg.branch
+        env.SANDCORP_REPO = PrCheckSkip.repoSlug(scm.userRemoteConfigs[0].url) ?: ''
+        decision = DeployGate.decide([
+            mainSha     : env.SANDCORP_MAIN_SHA,
+            branch      : env.SANDCORP_BRANCH,
+            deployBranch: cfg.branch,
+            rollbackSha : rollbackSha,
+            manual      : !currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').isEmpty(),
+            lastSuccess : shaOf(currentBuild.previousSuccessfulBuild),
+            lastAttempt : lastAttempt(),
+        ])
+        env.SANDCORP_GATE_KIND = decision.kind
+        // main 커밋을 배포할 때만 상태를 단다(ROLLBACK_SHA 되돌리기는 옛 sha 의 기록을 덮지 않게 달지 않는다).
+        if (decision.deploy && !rollbackSha && env.SANDCORP_REPO) {
+            env.SANDCORP_REPORT = 'true'
+            postStatus(env.SANDCORP_MAIN_SHA, DeployStatus.pending(env.BUILD_NUMBER))
+        }
     }
-    Map decision = DeployGate.decide([
-        mainSha     : env.SANDCORP_MAIN_SHA,
-        branch      : env.SANDCORP_BRANCH,
-        deployBranch: cfg.branch,
-        rollbackSha : rollbackSha,
-        manual      : !currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause').isEmpty(),
-        lastSuccess : shaOf(currentBuild.previousSuccessfulBuild),
-        lastAttempt : lastAttempt(),
-    ])
     echo "== ${decision.reason}"
     if (!decision.deploy) {
         env.SANDCORP_SKIP = 'true'
@@ -158,6 +169,7 @@ Map checkedTree(Map cfg) {
             return withCredentials([usernamePassword(credentialsId: Nodes.GITHUB_API_CREDENTIALS, usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
                 Map pick = PrCheckSkip.pickPr(main, cfg.branch, githubApi(repo, "commits/${main}/pulls") as List)
                 if (!pick.pr) { return PrCheckSkip.recheck(pick.reason) }
+                env.SANDCORP_PR = "${pick.pr.number}"  // 실패 댓글이 다시 찾지 않게
                 String head = pick.pr.headSha
                 return PrCheckSkip.decide(
                     pr: pick.pr,
@@ -241,7 +253,7 @@ void buildHere(Map cfg, String where) {
                 "BUILDER_NAME=${cfg.builder}", "SOURCE_URL=${cfg.sourceUrl}", "USE_SSH=${cfg.buildSsh ? '1' : '0'}",
                 "CACHE_REF=${im.cache}",
             ]) {
-                sh "bash '${script}'"
+                runLogged('이미지 굽기', where, "bash '${script}'", false)
             }
         }
     }
@@ -259,7 +271,7 @@ void buildHere(Map cfg, String where) {
                 failFast: true,
                 '검사': {
                     stage('검사') {
-                        withEnv(["SANDCORP_BUILT_ON=${where}"]) { sh cfg.check }
+                        withEnv(["SANDCORP_BUILT_ON=${where}"]) { runLogged('검사', where, cfg.check, false) }
                     }
                 },
                 '이미지 굽기': images,
@@ -313,7 +325,7 @@ void deployHere(Map cfg) {
         "SANDCORP_IMAGE_SHA=${env.DEPLOY_SHA}",
         'SANDCORP_ROLLBACK=0',
     ]) {
-        rc = sh(script: "bash '${script}'", returnStatus: true)
+        rc = runLogged('배포', Nodes.DEPLOY, "bash '${script}'", true)
     }
     if (rc != 0 && cfg.deployScript && env.SANDCORP_PREVIOUS_SHA) {
         // 저장소 배포 스크립트는 단계를 모르니, 실패하면 직전 이미지로 같은 스크립트를 한 번 더 돌린다(migrate 는 스크립트가 SANDCORP_ROLLBACK=1 을 보고 건너뛴다).
@@ -348,13 +360,37 @@ void deployHere(Map cfg) {
 
 // ---------------------------------------------------------------- 4. 디스코드
 
-void notifyDiscord(Map cfg) {
+// post always. 노드 하나(built-in)에서 커밋 상태를 끝맺고 디스코드에 알린다.
+void finish(Map cfg) {
+    if (env.SANDCORP_SKIP == 'true') {
+        // 작업 브랜치 push 등으로 건너뛴 빌드는 남길 상태가 있을 때만 노드를 잡는다.
+        if (env.SANDCORP_REPO && env.SANDCORP_MAIN_SHA && env.SANDCORP_GATE_KIND in ['deployed', 'failed']) {
+            node(Nodes.CONTROLLER) { skipStatus() }
+        }
+        return
+    }
     node(Nodes.CONTROLLER) {
-        catchError(buildResult: null, stageResult: null, message: '디스코드 알림 실패 — 배포 결과와 무관하다') {
-            withCredentials([string(credentialsId: Nodes.DISCORD_CREDENTIALS, variable: 'DISCORD_WEBHOOK')]) {
-                writeFile file: 'discord-payload.json', text: JsonOutput.toJson([content: discordText(cfg)])
-                sh 'curl -sS -X POST -H "Content-Type: application/json" --data @discord-payload.json "$DISCORD_WEBHOOK" > /dev/null || true'
-            }
+        if (env.SANDCORP_REPORT == 'true') {
+            postStatus(env.SANDCORP_MAIN_SHA, DeployStatus.finish(
+                build         : env.BUILD_NUMBER,
+                result        : currentBuild.currentResult,
+                builtOn       : env.BUILT_ON ?: '',
+                checkSkipped  : env.SANDCORP_CHECK_SKIPPED ?: '',
+                failedStage   : env.SANDCORP_FAILED_STAGE ?: '',
+                rolledBackTo  : env.SANDCORP_ROLLED_BACK_TO ?: '',
+                rollbackFailed: env.SANDCORP_ROLLBACK_FAILED == 'true',
+                took          : currentBuild.durationString.replace(' and counting', ''),
+            ))
+        }
+        notifyDiscord(cfg)
+    }
+}
+
+void notifyDiscord(Map cfg) {
+    catchError(buildResult: null, stageResult: null, message: '디스코드 알림 실패 — 배포 결과와 무관하다') {
+        withCredentials([string(credentialsId: Nodes.DISCORD_CREDENTIALS, variable: 'DISCORD_WEBHOOK')]) {
+            writeFile file: 'discord-payload.json', text: JsonOutput.toJson([content: discordText(cfg)])
+            sh 'curl -sS -X POST -H "Content-Type: application/json" --data @discord-payload.json "$DISCORD_WEBHOOK" > /dev/null || true'
         }
     }
 }
@@ -376,4 +412,101 @@ String discordText(Map cfg) {
         what = "${mark} [${cfg.name}] 배포 ${result} — ${sha}"
     }
     return "${what} · #${env.BUILD_NUMBER} · 빌드 ${env.BUILT_ON ?: '-'} · ${took} · ${env.BUILD_URL}".toString()
+}
+
+// ---------------------------------------------------------------- 5. GitHub 커밋 상태 · 실패 댓글(kr.sandcorp.ci.DeployStatus)
+// 자격은 Nodes.GITHUB_API_CREDENTIALS(재검사 판정·PR 검사 실패 댓글과 같다). 토큰은 환경변수로만 넘기고 찍지 않는다.
+// 무엇이 실패해도 경고만 — 배포 결과는 바꾸지 않는다. 사람이 빌드를 멈춘 것(FlowInterrupted)만 삼키지 않는다.
+
+// 건너뛴 빌드: 그 main sha 에 끝난 상태가 아직 없을 때만 남긴다(작업 브랜치 push 마다 깨는 빌드가 기록을 덮지 않게).
+void skipStatus() {
+    String sha = env.SANDCORP_MAIN_SHA
+    String repo = env.SANDCORP_REPO
+    guarded('커밋 상태') {
+        withCredentials([usernamePassword(credentialsId: Nodes.GITHUB_API_CREDENTIALS, usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+            String existing = DeployStatus.stateIn((githubApi(repo, "commits/${sha}/status") as Map).statuses as List)
+            Map st = DeployStatus.onSkip(build: env.BUILD_NUMBER, kind: env.SANDCORP_GATE_KIND, existing: existing)
+            if (st) {
+                githubPost(repo, "statuses/${sha}", st, 'status')
+                echo "== 커밋 상태 ${DeployStatus.CONTEXT}: ${st.state} · ${st.description}"
+            }
+        }
+    }
+}
+
+void postStatus(String sha, Map st) {
+    guarded('커밋 상태') {
+        withCredentials([usernamePassword(credentialsId: Nodes.GITHUB_API_CREDENTIALS, usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+            githubPost(env.SANDCORP_REPO, "statuses/${sha}", st, 'status')
+            echo "== 커밋 상태 ${DeployStatus.CONTEXT}: ${st.state} · ${st.description}"
+        }
+    }
+}
+
+// 단계 명령을 `sh` 와 같게(sh -xe) 돌리되 출력을 파일에도 남긴다(tee) — sandcorpPrCheck.runLogged 와 같은 모양.
+// 실패하면 병합된 PR 에 댓글을 달고, returnStatus 면 종료 코드를 돌려주고 아니면 같은 실패로 끝낸다.
+int runLogged(String stageName, String where, String script, boolean returnStatus) {
+    String tmp = pwd(tmp: true)
+    String key = ['검사': 'check', '이미지 굽기': 'image', '배포': 'deploy'][stageName] ?: 'step'
+    String cmd = "${tmp}/sandcorp-${key}.sh"
+    String log = "${tmp}/sandcorp-${key}.log"
+    writeFile file: cmd, text: script
+    int rc = sh(returnStatus: true, script: """#!/bin/bash
+sh -xe '${cmd}' 2>&1 | tee '${log}'
+exit "\${PIPESTATUS[0]}"
+""")
+    if (rc != 0) {
+        if (!env.SANDCORP_FAILED_STAGE) { env.SANDCORP_FAILED_STAGE = stageName }
+        commentFailure(stageName, where, rc, log)
+        if (!returnStatus) { error("${stageName}: script returned exit code ${rc}") }
+    }
+    return rc
+}
+
+// 배포한 sha 를 만든 병합 PR 에 실패 댓글 하나(kr.sandcorp.ci.FailureComment, 제목 앞머리 DeployStatus.COMMENT_PREFIX).
+// PR 을 못 찾으면(직접 push 등) 생략. 빌드 URL 은 넣지 않는다(내부 주소).
+void commentFailure(String stageName, String where, int rc, String log) {
+    if (env.SANDCORP_REPORT != 'true') { return }
+    guarded('PR 실패 댓글') {
+        String repo = env.SANDCORP_REPO
+        String sha = env.SANDCORP_MAIN_SHA
+        String output = sh(returnStdout: true, script: "tail -n ${FailureComment.READ_LINES} '${log}' 2>/dev/null || true")
+        withCredentials([usernamePassword(credentialsId: Nodes.GITHUB_API_CREDENTIALS, usernameVariable: 'GH_USER', passwordVariable: 'GH_TOKEN')]) {
+            String pr = env.SANDCORP_PR ?: ''
+            if (!pr) {
+                Map pick = PrCheckSkip.pickPr(sha, env.SANDCORP_DEPLOY_BRANCH, githubApi(repo, "commits/${sha}/pulls") as List)
+                if (!pick.pr) {
+                    echo "== PR 실패 댓글 생략: ${pick.reason}"
+                    return
+                }
+                pr = "${pick.pr.number}"
+                env.SANDCORP_PR = pr
+            }
+            String body = FailureComment.body(prefix: DeployStatus.COMMENT_PREFIX, stage: stageName, head: sha, where: where,
+                build: env.BUILD_NUMBER, code: rc, output: output)
+            githubPost(repo, "issues/${pr}/comments", [body: body], 'comment')
+            echo "== PR #${pr} 에 배포 실패 댓글을 달았다"
+        }
+    }
+}
+
+// GitHub REST POST. 몸통은 파일로(커질 수 있다). 실패(4xx·5xx·시간 초과)는 예외 — 부르는 쪽 guarded 가 경고로 바꾼다.
+void githubPost(String repo, String path, Map payload, String key) {
+    String json = "${pwd(tmp: true)}/sandcorp-github-${key}.json"
+    writeFile file: json, text: JsonOutput.toJson(payload)
+    withEnv(["GH_URL=https://api.github.com/repos/${repo}/${path}", "GH_BODY=${json}"]) {
+        sh '''#!/bin/sh
+set -e
+curl -fsS --max-time 10 -o /dev/null -X POST -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" --data @"$GH_BODY" "$GH_URL"
+'''
+    }
+}
+
+void guarded(String what, Closure body) {
+    try {
+        body()
+    } catch (err) {
+        if (err.getClass().getName().endsWith('FlowInterruptedException')) { throw err }
+        echo "경고: ${what} 실패(${err.getMessage()}) — 배포 결과는 그대로. 자격 ${Nodes.GITHUB_API_CREDENTIALS} 의 statuses·issues 쓰기 권한을 본다"
+    }
 }

@@ -18,29 +18,30 @@ class DeployGate implements Serializable {
      * @param a.manual         사람이 「Build Now」로 돌렸는가
      * @param a.lastSuccess    직전 성공 빌드의 [main: sha] 또는 null
      * @param a.lastAttempt    배포까지 간 가장 최근 빌드의 [main: sha, result: 'SUCCESS'|'FAILURE'] 또는 null
-     * @return [deploy: boolean, reason: String]
+     * @return [deploy: boolean, reason: String, kind: String]
+     *         kind = rollback | branch | unknown | deployed(이미 성공한 sha) | failed(직전 배포가 실패한 sha) | deploy — DeployStatus.onSkip 이 본다
      */
     static Map decide(Map a) {
         if (a.rollbackSha) {
-            return [deploy: true, reason: "ROLLBACK_SHA=${short12(a.rollbackSha)} 수동 되돌리기".toString()]
+            return [deploy: true, reason: "ROLLBACK_SHA=${short12(a.rollbackSha)} 수동 되돌리기".toString(), kind: 'rollback']
         }
         String b = a.branch ?: ''
         String want = a.deployBranch ?: 'main'
         if (b && !(b == want || b.endsWith('/' + want))) {
-            return [deploy: false, reason: "배포 브랜치(${want})가 아니다: ${b}".toString()]
+            return [deploy: false, reason: "배포 브랜치(${want})가 아니다: ${b}".toString(), kind: 'branch']
         }
         if (!a.mainSha) {
-            return [deploy: false, reason: 'main 커밋을 알 수 없다']
+            return [deploy: false, reason: 'main 커밋을 알 수 없다', kind: 'unknown']
         }
         if (a.lastSuccess?.main == a.mainSha) {
-            return [deploy: false, reason: "이미 배포에 성공한 sha ${short12(a.mainSha)} — main 이 움직이지 않았다(작업 브랜치 push 등)".toString()]
+            return [deploy: false, reason: "이미 배포에 성공한 sha ${short12(a.mainSha)} — main 이 움직이지 않았다(작업 브랜치 push 등)".toString(), kind: 'deployed']
         }
         // 실패한 sha 를 push 마다 다시 배포하면, 깨진 커밋이 작업 브랜치 push 때마다 배포→자동 롤백을 되풀이한다.
         // 사람이 「Build Now」로 돌릴 때만 같은 sha 를 다시 시도한다.
         if (!a.manual && a.lastAttempt?.main == a.mainSha && a.lastAttempt?.result != 'SUCCESS') {
-            return [deploy: false, reason: "직전 배포가 실패한 sha ${short12(a.mainSha)} — 다시 하려면 「Build Now」".toString()]
+            return [deploy: false, reason: "직전 배포가 실패한 sha ${short12(a.mainSha)} — 다시 하려면 「Build Now」".toString(), kind: 'failed']
         }
-        return [deploy: true, reason: "main ${short12(a.mainSha)} 배포".toString()]
+        return [deploy: true, reason: "main ${short12(a.mainSha)} 배포".toString(), kind: 'deploy']
     }
 
     static String short12(String sha) {
