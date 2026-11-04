@@ -49,6 +49,30 @@ String traced = ['+ echo -----BEGIN OPENSSH PRIVATE KEY-----', '-----BEGIN OPENS
 String tr = FailureComment.excerpt(traced)
 ok('추적 섞인 키 블록', !tr.contains('PRIVATE KEY') && !tr.contains('S0VZ') && tr.contains('Error: after'))
 
+// 로그 끝 자르기(READ_LINES)가 키 블록 가운데에 걸려 BEGIN 이 없고 END 가 먼저 나오면, 첫 줄부터 그 END 까지 지운다.
+String cut = ['S0VZYm9keTE', 'S0VZYm9keTI=', '-----END OPENSSH PRIVATE KEY-----', 'ok line', 'Error: after cut'].join('\n')
+String ct = FailureComment.excerpt(cut)
+ok('잘린 키 블록 본문 없음', !ct.contains('S0VZ') && !ct.contains('PRIVATE KEY'))
+ok('잘린 키 블록 뒤 실패 줄은 남는다', ct.contains('Error: after cut') && ct.contains('ok line'))
+eq('redact: 첫 END 까지 지운다', FailureComment.redact(['a', 'b', '-----END RSA PRIVATE KEY-----', 'c']), ['c'])
+// 블록이 한 번 열고 닫힌 뒤의 짝 없는 END(sh -x 추적)는 앞을 지우지 않는다.
+eq('redact: 닫힌 뒤 짝 없는 END', FailureComment.redact(['Error: before', '-----BEGIN RSA PRIVATE KEY-----', 'K', '-----END RSA PRIVATE KEY-----', '-----END RSA PRIVATE KEY-----', 'Error: after']), ['Error: before', 'Error: after'])
+
+// 줄 자르기(MAX_LINE_CHARS)보다 먼저 지운다 — 긴 줄 뒤쪽의 BEGIN·비밀값 표지가 잘려 나가면 안 된다.
+String pad = 'x' * (FailureComment.MAX_LINE_CHARS + 10)
+String longKey = ['Error: one', pad + '-----BEGIN OPENSSH PRIVATE KEY-----', 'TE9OR0tFWQ', '-----END OPENSSH PRIVATE KEY-----', pad + 'ghp_LONGTOKEN', 'Error: two'].join('\n')
+String lk = FailureComment.excerpt(longKey)
+ok('긴 줄 뒤 BEGIN 블록 지움', !lk.contains('TE9OR0tFWQ'))
+ok('긴 줄 지운 뒤 실패 줄 남음', lk.contains('Error: one') && lk.contains('Error: two'))
+eq('긴 줄 자체가 지워진다', lk.split('\n').findAll { it.startsWith('xxx') }.size(), 0)
+
+// PGP 개인 키(… PRIVATE KEY BLOCK-----)도 블록으로 지운다.
+String pgp = ['Error: one', '-----BEGIN PGP PRIVATE KEY BLOCK-----', '', 'UEdQS0VZ', '=AbCd', '-----END PGP PRIVATE KEY BLOCK-----', 'Error: two'].join('\n')
+String pg = FailureComment.excerpt(pgp)
+ok('PGP 키 본문 없음', !pg.contains('UEdQS0VZ') && !pg.contains('=AbCd') && !pg.contains('PRIVATE KEY'))
+ok('PGP 뒤 실패 줄', pg.contains('Error: one') && pg.contains('Error: two'))
+eq('redact: 잘린 PGP 블록', FailureComment.redact(['UEdQ', '-----END PGP PRIVATE KEY BLOCK-----', 'z']), ['z'])
+
 // 본문: 제목 줄 + 코드 블록. 출력에 ``` 가 있으면 더 긴 울타리.
 String body = FailureComment.body(stage: '검사', head: '0123456789abcdef0123', where: 'home', build: '42', url: 'https://j/job/x/42/', code: 1, output: 'Error: x\n```\ny')
 List<String> bl = body.split('\n') as List

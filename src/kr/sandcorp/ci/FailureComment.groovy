@@ -22,14 +22,24 @@ class FailureComment implements Serializable {
 
     static final Pattern HIT = Pattern.compile(/FAILED|Error|error:|Traceback|AssertionError|^E   |budget|예산/)
     static final Pattern SECRET = Pattern.compile(/ghp_|github_pat_|-----BEGIN|(?i:password=)|(?i:token=)|https:\/\/discord/)
-    static final Pattern KEY_BEGIN = Pattern.compile(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/)
-    static final Pattern KEY_END = Pattern.compile(/-----END [A-Z0-9 ]*PRIVATE KEY-----/)
+    /** OpenSSH·RSA·EC·PKCS#8(ENCRYPTED) 는 「… PRIVATE KEY-----」, PGP 는 「… PRIVATE KEY BLOCK-----」. */
+    static final Pattern KEY_BEGIN = Pattern.compile(/-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/)
+    static final Pattern KEY_END = Pattern.compile(/-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/)
 
-    /** 비밀값 줄을 지운다. 개인 키 블록(BEGIN…END)은 통째로, END 가 없으면 끝까지. */
+    /**
+     * 비밀값 줄을 지운다. 개인 키 블록(BEGIN…END)은 통째로, END 가 없으면 끝까지.
+     * 입력은 로그 끝(READ_LINES)만 읽은 것이라 키 블록 가운데부터 시작할 수 있다 — BEGIN 보다 END 가 먼저 나오면
+     * 첫 줄부터 그 END 줄까지 지운다.
+     */
     static List<String> redact(List<String> lines) {
         List<String> out = []
         boolean inKey = false
-        for (String l : lines) {
+        int start = 0
+        for (int i = 0; i < lines.size(); i++) {
+            if (KEY_BEGIN.matcher(lines[i]).find()) { break }
+            if (KEY_END.matcher(lines[i]).find()) { start = i + 1; break }
+        }
+        for (String l : lines.subList(start, lines.size())) {
             if (inKey) {
                 if (KEY_END.matcher(l).find()) { inKey = false }
                 continue
@@ -47,11 +57,15 @@ class FailureComment implements Serializable {
     static String excerpt(String text) {
         List<String> lines = []
         for (String l : (text ?: '').split('\n', -1)) {
-            String s = l.endsWith('\r') ? l.substring(0, l.length() - 1) : l
-            lines << (s.length() > MAX_LINE_CHARS ? s.substring(0, MAX_LINE_CHARS) + ' …(줄 잘림)' : s)
+            lines << (l.endsWith('\r') ? l.substring(0, l.length() - 1) : l)
         }
         while (lines && lines[-1].trim().isEmpty()) { lines.remove(lines.size() - 1) }
-        lines = redact(lines)
+        // 지우기는 줄 자르기보다 먼저 — 긴 줄 뒤쪽의 BEGIN·비밀값 표지가 잘려 나가면 블록을 못 알아본다.
+        List<String> kept = redact(lines)
+        lines = []
+        for (String s : kept) {
+            lines << (s.length() > MAX_LINE_CHARS ? s.substring(0, MAX_LINE_CHARS) + ' …(줄 잘림)' : s)
+        }
 
         // 끝에서부터 실패 줄 묶음([시작, 끝])을 모은다. 겹치거나 맞닿으면 합친다.
         List<List<Integer>> ranges = []
