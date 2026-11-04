@@ -35,6 +35,8 @@ class FailureComment implements Serializable {
                 continue
             }
             if (KEY_BEGIN.matcher(l).find()) { inKey = !KEY_END.matcher(l).find(); continue }
+            // sh -x 추적 줄(+ echo -----BEGIN …)이 블록을 먼저 열고 닫으면 실제 출력의 END 줄이 짝 없이 남는다.
+            if (KEY_END.matcher(l).find()) { continue }
             if (SECRET.matcher(l).find()) { continue }
             out << l
         }

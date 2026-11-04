@@ -43,6 +43,12 @@ ok('남길 줄은 남는다', red.contains('Error: one') && red.contains('Error:
 // 끝나지 않은 키 블록 뒤는 전부 지운다.
 ok('닫히지 않은 키 블록', !FailureComment.excerpt('Error: a\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\nError: b').contains('MIIE'))
 
+// sh -x 추적이 섞이면(+ echo -----BEGIN … 다음에 실제 출력) 짝 없는 END 줄도 남기지 않는다(PR 검사 실제 잡에서 본 모양).
+String traced = ['+ echo -----BEGIN OPENSSH PRIVATE KEY-----', '-----BEGIN OPENSSH PRIVATE KEY-----', '+ echo S0VZ', 'S0VZ',
+                 '+ echo -----END OPENSSH PRIVATE KEY-----', '-----END OPENSSH PRIVATE KEY-----', 'Error: after'].join('\n')
+String tr = FailureComment.excerpt(traced)
+ok('추적 섞인 키 블록', !tr.contains('PRIVATE KEY') && !tr.contains('S0VZ') && tr.contains('Error: after'))
+
 // 본문: 제목 줄 + 코드 블록. 출력에 ``` 가 있으면 더 긴 울타리.
 String body = FailureComment.body(stage: '검사', head: '0123456789abcdef0123', where: 'home', build: '42', url: 'https://j/job/x/42/', code: 1, output: 'Error: x\n```\ny')
 List<String> bl = body.split('\n') as List
