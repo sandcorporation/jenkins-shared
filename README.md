@@ -9,6 +9,7 @@ vars/sandcorpPrCheck.groovy       PR 검사 파이프라인. 저장소 Jenkinsfi
 vars/sandcorpBuildNode.groovy     빌드 노드 고르기(먼저 노드를 기다리고 못 잡으면 다른 노드) — 배포(macos 먼저)·PR 검사(home 먼저)가 같이 쓴다
 src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·노드 순서·자격 ID·대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
+src/kr/sandcorp/ci/DeployStatus.groovy  배포 결과 커밋 상태(sandcorp/deploy)에 쓸 값(순수 함수)
 resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시(CACHE_REF)·임시 DOCKER_CONFIG·--ssh default)
 resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
 resources/sandcorp/migrate-guard.py  파괴적 migration 판정(표준 라이브러리만, python 3.8+)
@@ -83,6 +84,18 @@ sandcorpDeploy(
 2. **이미지 빌드**: `BUILDER=auto`면 `Nodes.MAC_BUILD`를 `MAC_WAIT_SECONDS` 기다리고, 못 잡으면 `Nodes.HOME_BUILD`. 넘어가는 건 노드를 못 잡았을 때뿐이다(실행기를 잡은 뒤의 실패는 실패). 그 노드에서 배포할 sha를 체크아웃 → `check`와 이미지마다 `build-image.sh`(`<repo>:<sha>` 한 태그, 캐시 `<repo>-buildcache:<arch>`)를 나란히(`failFast`). 재검사를 생략하면 `검사` 단계에 근거 한 줄만 찍고 굽기만 한다.
 3. **배포**(`Nodes.DEPLOY`): 배포할 sha를 체크아웃(compose 파일이 그 sha 것), `deploy.sh`: pull → `preServices` → `dbCheck` → `migrate` → 주 서비스 교체 → healthy 대기 → `keepServices`·`extraServices` → 헬스 확인 → 옛 이미지 정리.
 4. **디스코드**(`discord-deploy-webhook`, URL은 찍지 않는다): ✅ 성공 · ❌ 실패 · ↩️ 자동 롤백(새 sha·되돌린 sha) · 🚨 자동 롤백도 실패 · 되돌리기 결과. 알림 실패는 빌드 결과를 바꾸지 않는다.
+5. **GitHub 커밋 상태**(built-in): main 커밋에 `sandcorp/deploy`를 단다 — gate에서 `pending`, post에서 `success`/`failure`. 실패하면 병합된 PR에 실패 댓글(아래 「배포 결과(GitHub)」).
+
+### 배포 결과(GitHub)
+
+작업자(work)는 Jenkins API 자격이 없다. 그래서 배포 결과를 GitHub에 남기고 `wait-deploy.py`(issue-track 스킬)가 `gh`로 읽는다(`kr.sandcorp.ci.DeployStatus`).
+
+- **커밋 상태** `sandcorp/deploy`, 배포한 main sha에. gate가 배포하기로 하면 `pending`(`빌드 #N · 배포 중`), post always가 `success`/`failure`(`빌드 #N · 성공 · 검사 생략 · 빌드 macos · 2분 3초`, `빌드 #N · 검사 실패 · 빌드 home`, `… 실패 → <sha> 자동 롤백` 등, 140자 안). 중단·시간 초과도 `failure`(`중단(시간 초과 포함)`) — pending으로 남기지 않는다. `target_url`은 비운다(빌드 URL은 내부 주소).
+- **건너뛴 빌드**(NOT_BUILT): 그 main sha에 끝난 상태가 아직 없을 때만 `success`(`건너뜀 · 이미 배포한 sha`) 또는 `failure`(`건너뜀 · 직전 배포가 실패한 sha`). 이미 있으면 덮지 않는다(작업 브랜치 push마다 깨는 빌드가 기록을 지우지 않게). 배포 브랜치가 아닌 빌드는 남기지 않는다.
+- **`ROLLBACK_SHA` 되돌리기**는 상태·댓글을 남기지 않는다(옛 sha의 기록을 덮지 않게).
+- **실패 댓글**: `검사`·`이미지 굽기`·`배포`(첫 실행) 명령을 `sh -xe` 그대로 돌리되 `tee`로 로그를 남기고, 실패하면 배포한 sha를 만든 병합 PR(`commits/<sha>/pulls`, 재검사 판정이 이미 찾았으면 그 PR)에 댓글 하나 — 제목 `배포 실패 — <단계> · <sha 12자> · <노드> · 빌드 #N`, 본문 규칙(실패 줄 앞뒤 3줄·150줄·60KB·비밀값 줄 제거)은 「실패 댓글」과 같고 빌드 URL은 넣지 않는다. PR을 못 찾으면(직접 push) 생략.
+- 자격은 `Nodes.GITHUB_API_CREDENTIALS`(`statuses`·`issues` 쓰기). 상태·댓글이 실패하면 경고만 — 배포 결과는 그대로다. 배포 경로에 더해지는 것은 GitHub POST 두 번(시작·끝, 각 `--max-time 10`)과 `tee` 뿐이다.
+- 한 push에 PR 여러 개가 묶이면 끝 커밋만 배포되고 그 앞 병합 커밋에는 상태가 없다. `wait-deploy.py`는 그때 main에서 그 커밋 뒤의 첫 `sandcorp/deploy` 커밋을 본다.
 
 ### 재검사 생략
 

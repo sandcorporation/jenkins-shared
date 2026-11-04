@@ -91,7 +91,7 @@ class FailureComment implements Serializable {
 
     /**
      * @param a.stage 단계 이름 · a.head PR head sha · a.where 노드(home|macos) · a.build 빌드 번호 · a.url 빌드 URL
-     *        a.code 종료 코드 · a.output 뽑을 출력(끝부분)
+     *        a.code 종료 코드 · a.output 뽑을 출력(끝부분) · a.prefix 제목 앞머리(기본 TITLE_PREFIX; 배포는 DeployStatus.COMMENT_PREFIX)
      */
     static String body(Map a) {
         String ex = excerpt(a.output as String)
@@ -101,12 +101,12 @@ class FailureComment implements Serializable {
         String fence = '`' * Math.max(3, longest + 1)
         String head = (a.head ?: '?') as String
         return [
-            "${TITLE_PREFIX}${a.stage} · ${head.take(12)} · ${a.where} · 빌드 #${a.build}",
+            "${a.prefix ?: TITLE_PREFIX}${a.stage} · ${head.take(12)} · ${a.where} · 빌드 #${a.build}",
             '',
             fence,
             ex,
             fence,
-            "종료 코드 ${a.code} · ${a.url ?: ''}".trim(),
+            (a.url ? "종료 코드 ${a.code} · ${a.url}" : "종료 코드 ${a.code}").toString(),
         ].join('\n')
     }
 
