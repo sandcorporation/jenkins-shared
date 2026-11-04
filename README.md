@@ -123,7 +123,7 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 
 PR이 열리거나 push되면 Jenkins가 빌드 노드(**home 먼저**, `WAIT_SECONDS` 안에 못 잡으면 macos — `Nodes.PR_CHECK_ORDER`)에서 **PR 머지 결과**(PR head를 main에 합친 것)를 받아 ① 파괴적 migrate 검사 ② 저장소 검사(`check`)를 돌린다.
 결과는 github-branch-source가 **PR head 커밋 상태** `continuous-integration/jenkins/pr-merge`(대기 → success/failure, 링크는 빌드)로 올린다.
-작업자는 `wait-ci.py <PR>`(dev-kit issue-track)로 그 상태를 기다리고 SUCCESS일 때만 병합한다 — wait-ci.py는 커밋 상태(StatusContext)와 check-runs를 함께 읽고, 빨강이면 링크의 Jenkins 콘솔에서 실패 줄을 뽑는다.
+작업자는 `wait-ci.py <PR>`(dev-kit issue-track)로 그 상태를 기다리고 SUCCESS일 때만 병합한다 — wait-ci.py는 커밋 상태(StatusContext)와 check-runs를 함께 읽고, 빨강이면 아래 「실패 댓글」을 출력한다(Jenkins 자격이 있는 곳에서는 콘솔에서 실패 줄을 뽑는다).
 조직이 GitHub 무료 요금제라 보호 규칙으로 병합을 막지는 못한다. 강제는 두 겹: 작업자 규칙(wait-ci.py 통과 뒤 병합) + 배포 잡의 배포 전 `check`.
 
 저장소에 `Jenkinsfile.pr`:
@@ -151,6 +151,23 @@ sandcorpPrCheck(
 
 같은 PR에 새 push가 오면 돌던 빌드를 끊는다(`disableConcurrentBuilds(abortPrevious: true)`). 잡 파라미터 `BUILDER`(auto/home/macos)·`WAIT_SECONDS`(첫 빌드 뒤 등록).
 
+### 실패 댓글
+
+작업자(work)는 Jenkins 콘솔을 읽을 자격을 두지 않는다(2026-11-04). 그래서 「파괴적 migrate」·「검사」 단계가 실패하면 Jenkins가 **PR에 댓글 하나**를 단다(`CHANGE_ID`가 있을 때만).
+
+```
+PR 검사 실패 — 검사 · 0123456789ab · home · 빌드 #42
+
+<실패 요지>
+종료 코드 1 · <빌드 URL>
+```
+
+- 단계 명령은 `sh`와 같게(`sh -xe`) 돌되 출력을 `tee`로 작업 공간 `@tmp/pr-check-{migrate,check}.log`에도 남긴다. 성공하면 그것뿐이다(댓글 없음).
+- 요지(`kr.sandcorp.ci.FailureComment`): 출력 끝 2000줄에서 `FAILED`·`Error`·`error:`·`Traceback`·`AssertionError`·`E   `·`budget`/`예산` 줄과 앞뒤 3줄, 끝 쪽부터 **최대 150줄·60KB**. 뽑을 게 없으면 끝 80줄.
+- 댓글은 저장소를 읽는 누구나 본다. `ghp_`·`github_pat_`·`-----BEGIN`·`password=`·`token=`·`https://discord`가 든 줄과 개인 키 블록(BEGIN…END)은 지운다. PR 검사의 `withCredentials`는 SSH 키 **파일 경로**(`GIT_SSH_KEY`)만 넘기므로 출력에 키 값이 나올 길은 `check`가 키 파일을 찍는 것뿐이고, 그 블록은 지워진다.
+- head는 PR head 커밋(머지 결과의 두 번째 부모, 빨리감기면 HEAD) — wait-ci.py가 PR `headRefOid` 앞 12자로 찾는다. 새 push로 다시 실패하면 새 댓글이 붙는다(옛 댓글은 그대로).
+- 자격은 배포의 재검사 판정과 같은 `github-sandcorporation-token`(`Nodes.GITHUB_API_CREDENTIALS`, 멀티브랜치 소스의 그것)으로 `POST /repos/{owner}/{repo}/issues/{N}/comments`. 못 달면(권한·네트워크) 경고만 찍고 빌드 결과는 단계 실패 그대로다.
+
 ### home에서 도는 검사
 
 home은 Jenkins **컨테이너**(built-in 노드)이고 호스트의 docker 소켓을 쓴다. 그래서 `check`가 워크스페이스 경로를 bind mount(`docker run -v "$PWD/…"`, compose의 `./…` volumes)하거나 컨테이너가 띄운 호스트 포트(`localhost:<포트>`)에 붙으면 home에서는 깨진다(호스트에 그 경로가 없다). `docker build`의 빌드 컨텍스트와 `docker exec`·`docker run -i`로 파이프하는 것은 괜찮다.
@@ -164,7 +181,7 @@ home은 Jenkins **컨테이너**(built-in 노드)이고 호스트의 docker 소�
 - refspec에 `+refs/heads/main:refs/remotes/@{remote}/main`을 더한다 — 파괴적 migrate 검사가 `origin/main..HEAD`로 PR이 더한 파일을 가른다(없으면 머지 커밋의 첫 부모로 대신한다).
 - Script Path `Jenkinsfile.pr`. 닫힌 PR 항목은 지우고(돌던 빌드도 끊음), 주기 스캔은 웹훅이 빠졌을 때의 그물(1시간).
 - GitHub 웹훅(`/github-webhook/`)에 **Pull requests** 이벤트가 있어야 PR 열기·push에 바로 돈다.
-- 상태 보고는 소스의 기본 동작이라 따로 설정하지 않는다(토큰에 `repo:status` 권한).
+- 상태 보고는 소스의 기본 동작이라 따로 설정하지 않는다(토큰에 `repo:status` 권한). 실패 댓글은 같은 토큰에 이슈·PR 쓰기 권한이 있어야 한다.
 
 ## 파괴적 migrate 검사
 
@@ -211,5 +228,5 @@ main에 병합하면 이 라이브러리를 쓰는 모든 저장소의 다음 �
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) · `tests/FailureCommentTest.groovy`(실패 댓글 요지·비밀값 지우기) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
