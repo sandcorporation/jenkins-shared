@@ -168,6 +168,7 @@ sandcorpPrCheck(
 | `check` | (필수) | 검사 명령. 빌드 노드에서 PR 머지 결과를 체크아웃한 뒤 돈다. `SANDCORP_BUILT_ON`(macos/home)·`SANDCORP_PR_CHECK=1`, `buildSsh`면 `GIT_SSH_KEY` |
 | `name` | 빈 값 | 표시용 |
 | `buildSsh` | `false` | `github-farrar142` 키 파일을 `GIT_SSH_KEY`로 넘긴다(ssh-agent는 check가 띄운다) |
+| `credentials` | `[]` | check에 더 넘길 Secret text 자격 `[[id:, variable:], ...]`(codemit: 검사가 이미지를 굽고 올리는 `ghcr-push-token`) |
 | `migrationGuard` | `true` | 파괴적 migrate 검사. Django가 아닌 저장소도 켜 둬도 된다(새 migration이 없으면 통과) |
 | `target` | `main` | `CHANGE_TARGET`이 없을 때의 기준 브랜치 |
 | `prefer` | `home` | 먼저 기다릴 노드. `macos`면 배포처럼 macos 먼저(아래 「home에서 도는 검사」) |
