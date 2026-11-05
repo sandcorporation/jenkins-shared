@@ -50,10 +50,16 @@ Map normalize(Map a) {
     if (!a.check) { error('sandcorpPrCheck: 인자 check 가 없다 — README.md') }
     String prefer = a.prefer ?: 'home'
     if (!(prefer in ['home', 'macos'])) { error("sandcorpPrCheck: prefer 는 home|macos 다(받은 값 '${prefer}')") }
+    List credentials = (a.credentials ?: []).collect { Map c ->
+        if (!c.id || !c.variable) { error("sandcorpPrCheck: credentials 항목마다 id·variable 이 있어야 한다: ${c.keySet()}") }
+        [id: c.id, variable: c.variable]
+    }
     return [
         name          : a.name ?: '',
         check         : a.check,
         buildSsh      : a.buildSsh ? true : false,
+        // check 에 더 넘길 Secret text 자격([id:, variable:]) — 예: 검사가 이미지를 굽고 ghcr 에 올리는 저장소(codemit)의 ghcr-push-token.
+        credentials   : credentials,
         migrationGuard: a.migrationGuard == null ? true : (a.migrationGuard ? true : false),
         target        : a.target ?: 'main',
         // home 먼저(기본) — check 가 home(Jenkins 컨테이너)에서 다 돌지 못하는 저장소만 prefer: 'macos'.
@@ -86,10 +92,15 @@ void checkHere(Map cfg, String where) {
 
     stage('검사') {
         withEnv(["SANDCORP_BUILT_ON=${where}", 'SANDCORP_PR_CHECK=1']) {
+            List creds = []
             if (cfg.buildSsh) {
-                withCredentials([sshUserPrivateKey(credentialsId: Nodes.GIT_SSH_CREDENTIALS, keyFileVariable: 'GIT_SSH_KEY')]) {
-                    runLogged('검사', where, cfg.check)
-                }
+                creds.add(sshUserPrivateKey(credentialsId: Nodes.GIT_SSH_CREDENTIALS, keyFileVariable: 'GIT_SSH_KEY'))
+            }
+            for (Map c in cfg.credentials) {
+                creds.add(string(credentialsId: c.id, variable: c.variable))
+            }
+            if (creds) {
+                withCredentials(creds) { runLogged('검사', where, cfg.check) }
             } else {
                 runLogged('검사', where, cfg.check)
             }
