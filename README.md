@@ -10,6 +10,7 @@ vars/sandcorpBuildNode.groovy     빌드 노드 고르기(먼저 노드를 기�
 src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·노드 순서·자격 ID·대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
 src/kr/sandcorp/ci/DeployStatus.groovy  배포 결과 커밋 상태(sandcorp/deploy)에 쓸 값(순수 함수)
+src/kr/sandcorp/ci/BuildOutput.groovy  저장소 빌드 스크립트가 배포 스크립트에 넘기는 KEY=VALUE 읽기(순수 함수)
 resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시(CACHE_REF)·임시 DOCKER_CONFIG·--ssh default)
 resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
 resources/sandcorp/migrate-guard.py  파괴적 migration 판정(표준 라이브러리만, python 3.8+)
@@ -48,13 +49,15 @@ sandcorpDeploy(
 |---|---|---|
 | `name` | (필수) | 디스코드 말머리 `[name]` |
 | `composeProject` | (필수) | `COMPOSE_PROJECT_NAME`. buildx 빌더 이름 기본값 `<composeProject>-images`에도 쓴다 |
-| `image` + `imageVar` | — | 이미지 하나: ghcr 저장소와 compose가 읽는 변수 이름 |
+| `image` + `imageVar` | — | 이미지 하나: ghcr 저장소와 compose가 읽는 변수 이름. `buildScript`를 주면 `image`·`images` 둘 다 비워도 된다 |
 | `images` | — | 이미지 여럿(daypage·sandcorp-flow): `[[repo:, envVar:, dockerfile: 'Dockerfile', context: '.', platform:, cache:], ...]`. `image`와 둘 중 하나. `cache`는 빌드 캐시 레지스트리 주소(기본 `<repo>-buildcache:<arch>`) — 전환 전 캐시를 그대로 쓰려는 저장소만 준다 |
 | `platform` | `linux/arm64` | 모든 이미지의 기본 플랫폼(항목마다 덮어쓰기) |
 | `sourceUrl` | 빈 값 | `org.opencontainers.image.source` 레이블 |
 | `buildSsh` | `false` | 빌드 노드에서 `github-farrar142` 키를 임시 ssh-agent에 넣고 `--ssh default`(비공개 git 의존성) |
 | `builder` | `<composeProject>-images` | buildx 빌더(docker-container) 이름 |
 | `check` | 빈 값 | 배포 전 검사 명령. 빌드 노드에서 체크아웃 뒤 이미지 빌드와 나란히 돈다. 실패하면 빌드를 끊고 배포하지 않는다(ghcr에 `<repo>:<sha>`가 먼저 올라가 있을 수는 있다). PR 검사가 같은 트리를 통과시켰으면 건너뛴다(아래 「재검사 생략」). `GIT_SSH_KEY`·`GHCR_TOKEN`·`SANDCORP_BUILT_ON`이 있다. 검사가 이미지 빌드 안에서 끝나는 저장소는 비운다 |
+| `buildScript` | 빈 값 | 이미지 굽기를 저장소 스크립트에 맡긴다(아래 「저장소 빌드 스크립트」). 비면 `images`마다 `build-image.sh` |
+| `buildCredentials` | `[]` | 빌드 노드의 검사·굽기에 더 넘길 Secret text 자격 `[[id:, variable:], ...]` |
 | `skipCheckedTree` | `true` | `false`면 PR 검사 결과와 상관없이 늘 재검사 |
 | `branch` | `main` | 배포 브랜치 |
 | `composeFiles` | `['docker-compose.prod.yml']` | `COMPOSE_FILE`(`:`로 잇는다) |
@@ -68,6 +71,7 @@ sandcorpDeploy(
 | `healthCmd` | 빈 값 | 주 서비스 컨테이너 안에서 `sh -c`로 돌릴 헬스 명령(3번, 4초 간격) |
 | `healthUrl` | 빈 값 | oracle에서 `curl -f`로 볼 주소. `healthCmd`와 둘 다 있으면 둘 다 본다 |
 | `keepImages` | `3` | oracle에 저장소마다 남길 이미지 수 |
+| `autoRollback` | `true` | `false`면 교체 뒤 실패에도 직전 이미지로 되돌리지 않는다 — `deployScript`를 다시 부르지 않고, 라이브러리 `deploy.sh`에는 되돌릴 이미지를 주지 않는다(종료 2). 저장소 스크립트가 되돌리기를 감당하지 못할 때 |
 | `deployScript` | 빈 값 | 라이브러리 배포 대신 저장소 스크립트(daypage의 롤링 교체처럼 순서가 다를 때). 아래 「저장소 배포 스크립트」 |
 | `macWaitSeconds` | `Nodes.MAC_WAIT_SECONDS`(180) | `MAC_WAIT_SECONDS` 파라미터 기본값 |
 | `timeoutMinutes` | `90` | 빌드 전체 시간 제한 |
@@ -116,7 +120,7 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 |---|---|---|
 | 0 | 성공 | SUCCESS |
 | 1 | 교체 **전** 실패(pull·DB·migrate) — 살아 있는 서비스는 옛 이미지 그대로 | FAILURE |
-| 2 | 교체 뒤 실패, 직전 성공 이미지가 없다(첫 배포 등) | FAILURE |
+| 2 | 교체 뒤 실패, 직전 성공 이미지가 없다(첫 배포 등) 또는 `autoRollback: false` | FAILURE |
 | 3 | 교체 뒤 실패 → 직전 이미지로 되돌렸고 헬스 통과 | FAILURE + ↩️ 알림 |
 | 4 | 되돌리기도 실패 — 운영이 내려가 있을 수 있다 | FAILURE + 🚨 알림 |
 
@@ -131,6 +135,14 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 ### 저장소 배포 스크립트(`deployScript`)
 
 라이브러리 순서로 안 되는 저장소(daypage: backend 두 대 롤링·Caddy reload)는 `deployScript: 'deploy/deploy.sh'`. 라이브러리는 이미지 변수(`images[].envVar`)와 `COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`·`DEPLOY_IMAGES`·`SANDCORP_IMAGE_SHA`(이번에 올릴 이미지 태그 = 커밋 sha)·`SANDCORP_ROLLBACK=0`을 넘겨 부른다. compose가 이미지 태그 하나(`${IMAGE_TAG}`)로 여러 이미지를 고정하는 저장소(sandcorp-flow)는 `SANDCORP_IMAGE_SHA`를 쓴다. 0이 아니면 직전 성공 sha 이미지로(`SANDCORP_IMAGE_SHA`도 그 sha) **같은 스크립트를 `SANDCORP_ROLLBACK=1`로 한 번 더** 부른다 — 스크립트는 그때 migrate를 건너뛰어야 한다. 단계를 구분하지 못하므로 교체 전 실패에도 되돌리기를 한 번 돈다(옛 이미지를 다시 올릴 뿐이다).
+
+### 저장소 빌드 스크립트(`buildScript`)
+
+이미지가 여럿이고 바뀐 서비스만 굽거나, 구운 이미지를 띄워 보는 가드가 있는 저장소(codemit: 여섯 이미지·문맥 해시로 건너뛰기·부팅 가드·`<svc>:<sha>-arm64` 태그)는 `buildScript: 'bash scripts/ci/build-images.sh'`. 라이브러리는 빌드 노드에서 배포할 sha를 체크아웃한 뒤 `images`마다 `build-image.sh`를 부르는 대신 그 명령을 「이미지 굽기」 단계로 한 번 돌린다(`check`와 나란히, 실패하면 실패 댓글 — 다른 단계와 같다).
+
+- 환경: `GHCR_TOKEN`·`GIT_SSH_KEY`·`buildCredentials`의 변수, `IMAGE_SHA`(=`DEPLOY_SHA`, 배포할 sha), `BUILT_ON`·`SANDCORP_BUILT_ON`(macos/home), `SANDCORP_PREVIOUS_SHA`(직전 성공 빌드가 배포한 sha, 없거나 같으면 빈 값), `SANDCORP_DEPLOY_ENV`.
+- **배포 스크립트에 값 넘기기**: 빌드 노드와 oracle은 셸 환경을 나누지 않는다. 스크립트가 `$SANDCORP_DEPLOY_ENV` 파일에 `KEY=VALUE` 줄을 쓰면 라이브러리가 읽어 `deployScript`의 환경에 더한다(`kr.sandcorp.ci.BuildOutput` — 키는 영대문자·숫자·밑줄, `SANDCORP_`·`DEPLOY_`·`COMPOSE_`·`PATH`·`HOME`은 덮지 못하고, 어긋난 줄은 빌드 실패). codemit은 python3가 있는 빌드 노드에서 낸 문맥 해시를 이 길로 oracle(python3 없음)에 넘긴다.
+- `ROLLBACK_SHA` 되돌리기는 빌드를 건너뛰니 넘기는 값이 없다.
 
 ## PR 검사(`sandcorpPrCheck`)
 

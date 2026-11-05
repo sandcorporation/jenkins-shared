@@ -1,5 +1,6 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
+import kr.sandcorp.ci.BuildOutput
 import kr.sandcorp.ci.DeployGate
 import kr.sandcorp.ci.DeployStatus
 import kr.sandcorp.ci.FailureComment
@@ -74,7 +75,12 @@ Map normalize(Map a) {
     need('name')
     need('composeProject')
     List images = a.images ?: (a.image ? [[repo: a.image, envVar: a.imageVar]] : [])
-    if (!images) { error('sandcorpDeploy: image(+imageVar) 또는 images 가 없다 — README.md') }
+    // buildScript 를 주는 저장소는 이미지를 스스로 굽는다 — images 는 배포 스크립트에 넘길 이름으로만 쓰고 비워도 된다.
+    if (!images && !a.buildScript) { error('sandcorpDeploy: image(+imageVar) 또는 images 가 없다(buildScript 를 주면 비워도 된다) — README.md') }
+    List buildCredentials = (a.buildCredentials ?: []).collect { Map c ->
+        if (!c.id || !c.variable) { error("sandcorpDeploy: buildCredentials 항목마다 id·variable 이 있어야 한다: ${c.keySet()}") }
+        [id: c.id, variable: c.variable]
+    }
     images = images.collect { Map im ->
         if (!im.repo || !im.envVar) { error("sandcorpDeploy: images 항목마다 repo·envVar 가 있어야 한다: ${im}") }
         [repo: im.repo, envVar: im.envVar, dockerfile: im.dockerfile ?: 'Dockerfile', context: im.context ?: '.',
@@ -87,6 +93,12 @@ Map normalize(Map a) {
         buildSsh      : a.buildSsh ? true : false,
         builder       : a.builder ?: "${a.composeProject}-images".toString(),
         check         : a.check ?: '',
+        // 이미지 굽기를 저장소 스크립트에 맡긴다(README 「저장소 빌드 스크립트」). 비면 images 마다 build-image.sh.
+        buildScript   : a.buildScript ?: '',
+        // 빌드 노드의 검사·굽기에 더 넘길 Secret text 자격([id:, variable:]).
+        buildCredentials: buildCredentials,
+        // false 면 교체 뒤 실패에도 직전 이미지로 되돌리지 않는다(README 「자동 롤백」).
+        autoRollback  : a.autoRollback == null ? true : (a.autoRollback ? true : false),
         // PR 검사가 main 에 들어온 바로 그 트리를 통과시켰으면 배포 전 재검사를 건너뛴다(README 「재검사 생략」). false 면 늘 재검사.
         skipCheckedTree: a.skipCheckedTree == null ? true : (a.skipCheckedTree ? true : false),
         branch        : a.branch ?: 'main',
@@ -245,8 +257,24 @@ void buildHere(Map cfg, String where) {
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · 빌드 ${where}" + (skipped ? " · ${skipped}" : '')
     echo "== 빌드 노드: ${where} (${env.NODE_NAME})"
     String script = "${pwd(tmp: true)}/sandcorp-build-image.sh"
+    String deployEnv = "${pwd(tmp: true)}/sandcorp-deploy.env"
     writeFile file: script, text: libraryResource('sandcorp/build-image.sh')
     Closure images = {
+        if (cfg.buildScript) {
+            // 저장소가 이미지를 스스로 굽는다(여러 서비스·변경분만·부팅 가드 등). 배포 스크립트에 넘길 값은
+            // $SANDCORP_DEPLOY_ENV 에 KEY=VALUE 로 쓴다(kr.sandcorp.ci.BuildOutput).
+            sh "rm -f '${deployEnv}'"
+            withEnv(["IMAGE_SHA=${env.DEPLOY_SHA}", "BUILT_ON=${where}", "SANDCORP_BUILT_ON=${where}",
+                     "SANDCORP_DEPLOY_ENV=${deployEnv}"]) {
+                runLogged('이미지 굽기', where, cfg.buildScript, false)
+            }
+            if (fileExists(deployEnv)) {
+                List lines = BuildOutput.parse(readFile(deployEnv))
+                env.SANDCORP_DEPLOY_ENV_LINES = lines.join('\n')
+                echo "== 배포 스크립트에 넘길 값: ${lines.collect { it.split('=', 2)[0] }.join(' ') ?: '없음'}"
+            }
+            return
+        }
         for (Map im in cfg.images) {
             withEnv([
                 "IMAGE_REPO=${im.repo}", "IMAGE_SHA=${env.DEPLOY_SHA}", "BUILT_ON=${where}",
@@ -258,10 +286,14 @@ void buildHere(Map cfg, String where) {
             }
         }
     }
-    withCredentials([
+    List creds = [
         string(credentialsId: Nodes.GHCR_PUSH_CREDENTIALS, variable: 'GHCR_TOKEN'),
         sshUserPrivateKey(credentialsId: Nodes.GIT_SSH_CREDENTIALS, keyFileVariable: 'GIT_SSH_KEY')
-    ]) {
+    ]
+    for (Map c in cfg.buildCredentials) {
+        creds.add(string(credentialsId: c.id, variable: c.variable))
+    }
+    withCredentials(creds) {
         if (!cfg.check) {
             images()
         } else if (skipped) {
@@ -318,22 +350,26 @@ void deployHere(Map cfg) {
     ]
     // 이미지 변수(PORTFOLIO_IMAGE 등)도 넘겨 저장소 배포 스크립트가 그대로 쓸 수 있게 한다.
     List imageVars = cfg.images.collect { "${it.envVar}=${it.repo}:${env.DEPLOY_SHA}" }
-    echo "== oracle은 굽지 않는다: ${imagesAt(cfg, env.DEPLOY_SHA)} 를 pull"
+    // 빌드 스크립트가 넘긴 값(buildScript 의 $SANDCORP_DEPLOY_ENV). 되돌리기(ROLLBACK_SHA)는 빌드를 건너뛰니 없다.
+    List buildOutput = BuildOutput.parse(env.SANDCORP_DEPLOY_ENV_LINES ?: '')
+    echo(cfg.images ? "== oracle은 굽지 않는다: ${imagesAt(cfg, env.DEPLOY_SHA)} 를 pull" : "== oracle은 굽지 않는다: ${DeployGate.short12(env.DEPLOY_SHA)} 이미지를 배포 스크립트가 pull")
+    // autoRollback: false 면 되돌릴 이미지를 주지 않는다 — 라이브러리 deploy.sh 는 종료 2(교체 뒤 실패, 되돌림 없음)로 끝난다.
+    String previousImages = cfg.autoRollback ? imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA) : ''
     int rc
-    withEnv(common + imageVars + [
+    withEnv(common + imageVars + buildOutput + [
         "DEPLOY_IMAGES=${imagesAt(cfg, env.DEPLOY_SHA)}",
-        "DEPLOY_PREVIOUS_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}",
+        "DEPLOY_PREVIOUS_IMAGES=${previousImages}",
         "SANDCORP_IMAGE_SHA=${env.DEPLOY_SHA}",
         'SANDCORP_ROLLBACK=0',
     ]) {
         rc = runLogged('배포', Nodes.DEPLOY, "bash '${script}'", true)
     }
-    if (rc != 0 && cfg.deployScript && env.SANDCORP_PREVIOUS_SHA) {
+    if (rc != 0 && cfg.autoRollback && cfg.deployScript && env.SANDCORP_PREVIOUS_SHA) {
         // 저장소 배포 스크립트는 단계를 모르니, 실패하면 직전 이미지로 같은 스크립트를 한 번 더 돌린다(migrate 는 스크립트가 SANDCORP_ROLLBACK=1 을 보고 건너뛴다).
         echo "== 배포 실패(${rc}) — 직전 이미지 ${DeployGate.short12(env.SANDCORP_PREVIOUS_SHA)} 로 자동 롤백"
         List prevVars = cfg.images.collect { "${it.envVar}=${it.repo}:${env.SANDCORP_PREVIOUS_SHA}" }
         int rc2
-        withEnv(common + prevVars + ["DEPLOY_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}", 'DEPLOY_PREVIOUS_IMAGES=',
+        withEnv(common + prevVars + buildOutput + ["DEPLOY_IMAGES=${imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA)}", 'DEPLOY_PREVIOUS_IMAGES=',
                  "SANDCORP_IMAGE_SHA=${env.SANDCORP_PREVIOUS_SHA}", 'SANDCORP_ROLLBACK=1']) {
             rc2 = sh(script: "bash '${script}'", returnStatus: true)
         }
@@ -346,7 +382,8 @@ void deployHere(Map cfg) {
             error('배포 실패 — 교체 전에 멈췄다(pull·DB·migrate). 살아 있는 서비스는 옛 이미지 그대로다')
             break
         case 2:
-            error('배포 실패 — 교체 뒤 헬스 실패, 되돌릴 직전 성공 이미지가 없다. 운영을 바로 봐야 한다')
+            error(cfg.autoRollback ? '배포 실패 — 교체 뒤 헬스 실패, 되돌릴 직전 성공 이미지가 없다. 운영을 바로 봐야 한다'
+                                   : '배포 실패 — 교체 뒤 실패, 자동 롤백을 끈 저장소다(autoRollback: false). 운영을 바로 봐야 한다')
             break
         case 3:
             env.SANDCORP_ROLLED_BACK_TO = env.SANDCORP_PREVIOUS_SHA
