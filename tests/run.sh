@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 이 저장소의 시험 전부. Jenkins 없이 돈다(도커만 있으면 된다).
 #   bash tests/run.sh
-#   1) deploy.sh 성공·자동 롤백 경로 · build-image.sh 인자 · wait-ghcr-image.sh 대기·시간 초과(가짜 docker)   2) DeployGate·PrCheckSkip·Nodes·FailureComment·DeployStatus·StepScript·BuildOutput 시험(groovy)
+#   1) deploy.sh 성공·자동 롤백 경로 · build-image.sh 인자 · wait-ghcr-image.sh 대기·시간 초과(가짜 docker) · extra-checkout.sh 고정 sha 받기(로컬 git)   2) DeployGate·PrCheckSkip·Nodes·FailureComment·DeployStatus·StepScript·BuildOutput·ExtraCheckouts 시험(groovy)
 #   3) Groovy 전부 컴파일(문법 검사)                  4) shellcheck
 #   5) 파괴적 migrate 판정(python:3.9 — 맥 노드 python3 호환) · 새 migration 고르기(git)
 set -euo pipefail
@@ -15,6 +15,7 @@ echo "== 1) deploy.sh · build-image.sh · wait-ghcr-image.sh"
 bash tests/deploy_test.sh
 bash tests/build_image_test.sh
 bash tests/wait_ghcr_image_test.sh
+bash tests/extra_checkout_test.sh
 
 echo "== 2) DeployGate·PrCheckSkip·Nodes·FailureComment·DeployStatus·StepScript·BuildOutput · 3) Groovy 컴파일"
 docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:ro" -w /src "$GROOVY_IMAGE" sh -c '
@@ -30,6 +31,7 @@ docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$root:/src:ro" -w /src "
   groovy -cp "$out" tests/DeployStatusTest.groovy
   groovy -cp "$out" tests/StepScriptTest.groovy
   groovy -cp "$out" tests/BuildOutputTest.groovy
+  groovy -cp "$out" tests/ExtraCheckoutsTest.groovy
 '
 
 echo "== 4) shellcheck"

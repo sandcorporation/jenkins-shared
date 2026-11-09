@@ -74,6 +74,7 @@ sandcorpDeploy(
 | `healthUrl` | 빈 값 | oracle에서 `curl -f`로 볼 주소. `healthCmd`와 둘 다 있으면 둘 다 본다 |
 | `keepImages` | `3` | oracle에 저장소마다 남길 이미지 수 |
 | `autoRollback` | `true` | `false`면 교체 뒤 실패에도 직전 이미지로 되돌리지 않는다 — `deployScript`를 다시 부르지 않고, 라이브러리 `deploy.sh`에는 되돌릴 이미지를 주지 않는다(종료 2). 저장소 스크립트가 되돌리기를 감당하지 못할 때 |
+| `extraCheckouts` | `[]` | 배포(oracle) 단계에서 다른 저장소를 고정 sha로 받는다 `[[url:, refFile:, dir:, credentialsId:], ...]`(아래 「다른 저장소 받기」). 비면 지금과 같다 |
 | `deployScript` | 빈 값 | 라이브러리 배포 대신 저장소 스크립트(daypage의 롤링 교체처럼 순서가 다를 때). 아래 「저장소 배포 스크립트」 |
 | `macWaitSeconds` | `Nodes.MAC_WAIT_SECONDS`(180) | `MAC_WAIT_SECONDS` 파라미터 기본값 |
 | `timeoutMinutes` | `90` | 빌드 전체 시간 제한 |
@@ -137,6 +138,22 @@ main 병합 커밋 M을 PR 검사(`continuous-integration/jenkins/pr-merge`)가 
 ### 저장소 배포 스크립트(`deployScript`)
 
 라이브러리 순서로 안 되는 저장소(daypage: backend 두 대 롤링·Caddy reload)는 `deployScript: 'deploy/deploy.sh'`. 라이브러리는 이미지 변수(`images[].envVar`)와 `COMPOSE_PROJECT_NAME`·`COMPOSE_FILE`·`DEPLOY_IMAGES`·`SANDCORP_IMAGE_SHA`(이번에 올릴 이미지 태그 = 커밋 sha)·`SANDCORP_ROLLBACK=0`을 넘겨 부른다. compose가 이미지 태그 하나(`${IMAGE_TAG}`)로 여러 이미지를 고정하는 저장소(sandcorp-flow)는 `SANDCORP_IMAGE_SHA`를 쓴다. 0이 아니면 직전 성공 sha 이미지로(`SANDCORP_IMAGE_SHA`도 그 sha) **같은 스크립트를 `SANDCORP_ROLLBACK=1`로 한 번 더** 부른다 — 스크립트는 그때 migrate를 건너뛰어야 한다. 단계를 구분하지 못하므로 교체 전 실패에도 되돌리기를 한 번 돈다(옛 이미지를 다시 올릴 뿐이다).
+
+### 다른 저장소 받기(`extraCheckouts`)
+
+운영 데이터처럼 공개 저장소에 둘 수 없는 파일을 비공개 저장소에서 받아 compose가 마운트하게 할 때(promptlab 문제은행).
+
+```groovy
+extraCheckouts: [[url: 'git@github.com:sandcorporation/sandcorp-promptlab-problems.git',
+                  refFile: 'deploy/problems.ref', dir: 'problems-data',
+                  credentialsId: 'promptlab-problems-deploy-key']],
+```
+
+- **어디서**: 배포 단계(`Nodes.DEPLOY`)에서만, `checkout scm`·배포할 sha 체크아웃 바로 뒤, `deploy.sh`·`deployScript` 앞. 이미지 빌드·`check` 노드에서는 돌지 않는다 — 받은 파일이 이미지에 들어가지 않는다.
+- **무엇을**: `refFile`(배포할 sha의 저장소 안 파일)에 적힌 40자 소문자 sha 한 줄(끝 줄바꿈 하나 허용)의 커밋 하나만 `dir`에 얕게(`--depth 1`) 받고, 받은 `HEAD`가 그 sha인지 확인한다. 형식이 틀리면(빈 파일·짧은 sha·두 줄·브랜치 이름) 배포 실패. 데이터를 바꾸면 그 저장소에 커밋하고 이 저장소에서 `refFile` 한 줄을 바꾸는 PR을 낸다 — 어느 데이터로 도는지가 이력에 남는다.
+- **매번 새로**: `dir`이 있으면 Jenkins `deleteDir`로 지우고 다시 받는다. `dir`은 워크스페이스 바로 아래 한 칸 이름만(슬래시·`..`·점으로 시작 금지), `url`은 `git@github.com:<owner>/<repo>.git`만.
+- **자격**: `credentialsId`는 SSH Username with private key(username `git`, 그 저장소의 읽기 전용 deploy key). `withCredentials(sshUserPrivateKey)`의 임시 키 파일을 `GIT_SSH_COMMAND -i`로만 쓰고 키는 찍지 않는다. 호스트 키는 저장소에 고정한 GitHub 공개 호스트 키(`resources/sandcorp/github_known_hosts`, `api.github.com/meta`의 `ssh_keys`)로 `StrictHostKeyChecking=yes` — 워크스페이스가 새로우면 `accept-new`는 매번 첫 접속을 믿는 것과 같아서 고르지 않았다. GitHub가 호스트 키를 바꾸면 이 파일을 고친다.
+- 실패하면 교체 전이라 살아 있는 서비스는 그대로다(실패 단계 「다른 저장소 받기」). 되돌리기(`ROLLBACK_SHA`)는 지금 main의 `refFile`을 쓴다.
 
 ### 저장소 빌드 스크립트(`buildScript`)
 
@@ -273,5 +290,5 @@ main에 병합하면 이 라이브러리를 쓰는 모든 저장소의 다음 �
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) · `tests/wait_ghcr_image_test.sh`(`wait-ghcr-image.sh` 나타남·시간 초과·여러 이미지) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) · `tests/FailureCommentTest.groovy`(실패 댓글 요지·비밀값 지우기) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) · `tests/wait_ghcr_image_test.sh`(`wait-ghcr-image.sh` 나타남·시간 초과·여러 이미지) · `tests/extra_checkout_test.sh`(`extra-checkout.sh` 고정 sha 얕게 받기·HEAD 검증·없는 sha·이미 있는 dir·잘못된 인자, 로컬 git) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) · `tests/FailureCommentTest.groovy`(실패 댓글 요지·비밀값 지우기) · `tests/ExtraCheckoutsTest.groovy`(`extraCheckouts` 인자 없음 = 빈 목록·항목마다 받기 명령·잘못된 인자·잘못된 ref) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
