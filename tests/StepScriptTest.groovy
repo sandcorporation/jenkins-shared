@@ -7,7 +7,8 @@ def refuses = { what, Closure c -> try { c(); assert false: "${what}: 통과했�
 
 String tmp = '/w/sandcorp-portfolio@tmp'
 // 라이브러리가 @tmp 에 쓰는 실제 스크립트(vars/*.groovy 의 writeFile). 단계 명령 파일은 어느 것과도 겹치면 안 된다.
-List real = ["${tmp}/sandcorp-deploy.sh", "${tmp}/sandcorp-build-image.sh", "${tmp}/migrate-guard.sh", "${tmp}/migrate-guard.py"]*.toString()
+List real = ["${tmp}/sandcorp-deploy.sh", "${tmp}/sandcorp-build-image.sh", "${tmp}/migrate-guard.sh", "${tmp}/migrate-guard.py",
+             "${tmp}/sandcorp-extra-checkout.sh", "${tmp}/sandcorp-github-known-hosts"]*.toString()
 List steps = ['check', 'image', 'deploy', 'step'].collect { StepScript.path(tmp, 'sandcorp', it) } +
     ['check', 'migrate'].collect { StepScript.path(tmp, 'pr-check', it) }
 

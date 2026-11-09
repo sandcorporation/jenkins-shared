@@ -3,6 +3,7 @@ import groovy.json.JsonSlurperClassic
 import kr.sandcorp.ci.BuildOutput
 import kr.sandcorp.ci.DeployGate
 import kr.sandcorp.ci.DeployStatus
+import kr.sandcorp.ci.ExtraCheckouts
 import kr.sandcorp.ci.FailureComment
 import kr.sandcorp.ci.Nodes
 import kr.sandcorp.ci.PrCheckSkip
@@ -70,6 +71,14 @@ def call(Map args) {
 
 // ---------------------------------------------------------------- 인자
 
+List extraCheckoutsOf(Object raw) {
+    try {
+        return ExtraCheckouts.normalize(raw)
+    } catch (IllegalArgumentException e) {
+        error("sandcorpDeploy: ${e.message} — README.md")
+    }
+}
+
 Map normalize(Map a) {
     def need = { String k -> if (!a[k]) { error("sandcorpDeploy: 인자 ${k} 가 없다 — README.md") } }
     need('name')
@@ -117,6 +126,8 @@ Map normalize(Map a) {
         keepImages    : (a.keepImages ?: 3) as int,
         macWaitSeconds: (a.macWaitSeconds ?: Nodes.MAC_WAIT_SECONDS) as int,
         timeoutMinutes: (a.timeoutMinutes ?: 90) as int,
+        // 배포(oracle) 단계에서 checkout scm 뒤에 고정 sha 로 받을 다른 저장소(README 「다른 저장소 받기」). 없으면 [] — 지금과 같다.
+        extraCheckouts: extraCheckoutsOf(a.extraCheckouts),
     ]
 }
 
@@ -336,6 +347,7 @@ void deployHere(Map cfg) {
     if (!rollback) {
         sh "git checkout -q --detach ${env.DEPLOY_SHA}"
     }
+    if (cfg.extraCheckouts) { fetchExtraCheckouts(cfg) }
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "빌드 ${env.BUILT_ON}") + ' · oracle pull'
     String script = cfg.deployScript ?: "${pwd(tmp: true)}/sandcorp-deploy.sh"
     if (!cfg.deployScript) {
@@ -393,6 +405,34 @@ void deployHere(Map cfg) {
         default:
             env.SANDCORP_ROLLBACK_FAILED = 'true'
             error("배포 실패 — 자동 롤백도 실패했다(종료 ${rc}). 운영을 바로 봐야 한다")
+    }
+}
+
+// extraCheckouts: 배포할 sha 의 refFile 이 고정한 커밋을 dir 에 얕게 받는다(교체 전 — 실패하면 살아 있는 서비스는 그대로).
+// 이미지 빌드·check 노드에서는 돌지 않는다(받은 데이터가 이미지에 들어가지 않게). 되돌리기(ROLLBACK_SHA)는 지금 main 의 refFile 을 쓴다.
+void fetchExtraCheckouts(Map cfg) {
+    String tmp = pwd(tmp: true)
+    String script = "${tmp}/sandcorp-extra-checkout.sh"
+    String knownHosts = "${tmp}/sandcorp-github-known-hosts"
+    writeFile file: script, text: libraryResource('sandcorp/extra-checkout.sh')
+    writeFile file: knownHosts, text: libraryResource('sandcorp/github_known_hosts')
+    for (Map e in cfg.extraCheckouts) {
+        String sha
+        try {
+            sha = ExtraCheckouts.parseRef(e.refFile, readFile(file: e.refFile, encoding: 'UTF-8'))
+        } catch (IllegalArgumentException ex) {
+            env.SANDCORP_FAILED_STAGE = '다른 저장소 받기'
+            error("배포 실패 — ${ex.message}")
+        }
+        // dir 은 normalize 가 워크스페이스 바로 아래 한 칸 이름으로 검증했다. 지우기는 Jenkins deleteDir(셸 rm 아님).
+        dir(e.dir) { deleteDir() }
+        withCredentials([sshUserPrivateKey(credentialsId: e.credentialsId, keyFileVariable: 'SANDCORP_EXTRA_KEY')]) {
+            int rc = sh(returnStatus: true, script: ExtraCheckouts.command(script, knownHosts, e, sha))
+            if (rc != 0) {
+                env.SANDCORP_FAILED_STAGE = '다른 저장소 받기'
+                error("배포 실패 — ${e.url} @ ${DeployGate.short12(sha)} 받기 실패(종료 ${rc}). 교체 전이라 살아 있는 서비스는 그대로다")
+            }
+        }
     }
 }
 
