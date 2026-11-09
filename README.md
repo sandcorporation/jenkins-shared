@@ -62,6 +62,9 @@ sandcorpDeploy(
 | `buildCredentials` | `[]` | 빌드 노드의 검사·굽기에 더 넘길 Secret text 자격 `[[id:, variable:], ...]` |
 | `skipCheckedTree` | `true` | `false`면 PR 검사 결과와 상관없이 늘 재검사 |
 | `branch` | `main` | 배포 브랜치 |
+| `deployFrom` | 빈 값 | 승격 브랜치(`'production'`)만 배포하고 굽지도 검사하지도 않는다 — 아래 「승격 브랜치에서 배포」. 주면 `branch`는 이 값이다(다르게 주면 실패). `image`/`images`가 있어야 한다. 비면 지금 동작 그대로 |
+| `imageWaitMinutes` | `5` | `deployFrom`에서 배포 전에 이미지가 ghcr에 보일 때까지 기다리는 상한(분). 승격 전에 이미 올라가 있어야 하니 짧다 |
+| `imageWaitHint` | 빈 값 | 이미지를 못 찾을 때 찍을 주소(Actions 워크플로 등) |
 | `composeFiles` | `['docker-compose.prod.yml']` | `COMPOSE_FILE`(`:`로 잇는다) |
 | `deployDir` | 잡 워크스페이스 | oracle에서 배포할 디렉터리(`ws()`). 운영 `.env`가 있어야 한다 |
 | `service` | `web` | 주 서비스. DB 확인·migrate도 이 서비스 이미지로 `compose run --rm --no-deps` |
@@ -79,7 +82,7 @@ sandcorpDeploy(
 | `macWaitSeconds` | `Nodes.MAC_WAIT_SECONDS`(180) | `MAC_WAIT_SECONDS` 파라미터 기본값 |
 | `timeoutMinutes` | `90` | 빌드 전체 시간 제한 |
 
-잡 파라미터: `BUILDER`(auto/macos/home), `MAC_WAIT_SECONDS`, `ROLLBACK_SHA`.
+잡 파라미터: `BUILD_ON`(`deployFrom`이 있으면 actions/jenkins, 없으면 jenkins 하나 — 동작은 지금 그대로), `BUILDER`(auto/macos/home), `MAC_WAIT_SECONDS`, `ROLLBACK_SHA`.
 
 ## 동작
 
@@ -162,6 +165,34 @@ extraCheckouts: [[url: 'git@github.com:sandcorporation/sandcorp-promptlab-proble
 - 환경: `GHCR_TOKEN`·`GIT_SSH_KEY`·`buildCredentials`의 변수, `IMAGE_SHA`(=`DEPLOY_SHA`, 배포할 sha), `BUILT_ON`·`SANDCORP_BUILT_ON`(macos/home), `SANDCORP_PREVIOUS_SHA`(직전 성공 빌드가 배포한 sha, 없거나 같으면 빈 값), `SANDCORP_DEPLOY_ENV`.
 - **배포 스크립트에 값 넘기기**: 빌드 노드와 oracle은 셸 환경을 나누지 않는다. 스크립트가 `$SANDCORP_DEPLOY_ENV` 파일에 `KEY=VALUE` 줄을 쓰면 라이브러리가 읽어 `deployScript`의 환경에 더한다(`kr.sandcorp.ci.BuildOutput` — 키는 영대문자·숫자·밑줄, `SANDCORP_`·`DEPLOY_`·`COMPOSE_`·`PATH`·`HOME`은 덮지 못하고, 어긋난 줄은 빌드 실패). codemit은 python3가 있는 빌드 노드에서 낸 문맥 해시를 이 길로 oracle(python3 없음)에 넘긴다.
 - `ROLLBACK_SHA` 되돌리기는 빌드를 건너뛰니 넘기는 값이 없다.
+
+### 승격 브랜치에서 배포(`deployFrom`)
+
+GitHub Actions가 main을 검사하고 이미지를 굽고, 둘 다 통과하면 `production` 브랜치를 그 sha로 fast-forward한다(시범: sandcorp-metrics `.github/workflows/release.yml`). Jenkins는 그 브랜치만 본다.
+
+```groovy
+sandcorpDeploy(
+  name: 'Metrics',
+  deployFrom: 'production',
+  images: [[repo: 'ghcr.io/sandcorporation/sandcorp-metrics', envVar: 'METRICS_IMAGE']],
+  imageWaitHint: 'https://github.com/sandcorporation/sandcorp-metrics/actions/workflows/release.yml',
+  // 비상 길(BUILD_ON=jenkins)에 쓸 굽기 — 지금 인자 그대로(images 마다 build-image.sh 또는 buildScript)
+  composeProject: 'metrics',
+  ...
+)
+```
+
+| `BUILD_ON` | `ROLLBACK_SHA` | 이미지 빌드 | 검사(`check`) | 배포 전 |
+|---|---|---|---|---|
+| `actions`(기본) | 빈 값 | 건너뜀 | 건너뜀 | `waitForGhcrImage`(`imageWaitMinutes`), 빌드 노드 표시 `actions` |
+| `jenkins`(비상) | 빈 값 | 지금처럼 macos→home | 지금처럼(재검사 생략 포함) | 없음 |
+| 아무것 | sha | 건너뜀 | 건너뜀 | 그 sha의 이미지가 남아 있는지 `waitForGhcrImage` |
+
+- gate(`DeployGate`)는 `deployFrom` 브랜치를 배포 브랜치로 본다. 잡이 아직 main을 받으면 「배포 브랜치(production)가 아니다」로 `NOT_BUILT` — 잡 설정의 브랜치 지정자를 `*/production`으로 바꿔야 배포가 돈다.
+- main push도 웹훅으로 잡을 깨우지만 production이 움직이지 않았으면 「이미 배포에 성공한 sha」로 건너뛴다.
+- 이미지를 못 찾으면 교체 전에 실패한다(실패 단계 `이미지 기다리기`). 살아 있는 서비스는 그대로다.
+- 커밋 상태(`sandcorp/deploy`)·실패 댓글·디스코드·자동 롤백은 지금과 같다.
+- `deployFrom`이 없으면 `BUILD_ON`은 `jenkins` 하나뿐이고 판정(`kr.sandcorp.ci.DeployFrom`)은 지금 동작 그대로다(`tests/DeployFromTest.groovy`).
 
 ## PR 검사(`sandcorpPrCheck`)
 
@@ -264,7 +295,7 @@ null 불가 새 열은 둘 중 하나로 고친다.
 
 ## Actions에서 굽는 이미지(`waitForGhcrImage`)
 
-이미지를 Jenkins가 아니라 GitHub Actions(`ubuntu-24.04-arm`, `push: main`만, `GITHUB_TOKEN`의 `packages: write`)가 굽는 저장소용 단계다. 시범은 sandcorp-metrics(`.github/workflows/image.yml`, 자체 Jenkinsfile). `sandcorpDeploy`·`sandcorpPrCheck`는 이 단계를 쓰지 않고 동작도 그대로다.
+이미지를 Jenkins가 아니라 GitHub Actions(`ubuntu-24.04-arm`, `push: main`만, `GITHUB_TOKEN`의 `packages: write`)가 굽는 저장소용 단계다. `sandcorpDeploy`는 `deployFrom`을 줄 때만 이 단계를 쓴다(위 「승격 브랜치에서 배포」). `sandcorpPrCheck`는 쓰지 않는다.
 
 ```groovy
 @Library('sandcorp') _
