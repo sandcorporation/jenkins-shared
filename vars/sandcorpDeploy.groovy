@@ -1,6 +1,7 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
 import kr.sandcorp.ci.BuildOutput
+import kr.sandcorp.ci.DeployFrom
 import kr.sandcorp.ci.DeployGate
 import kr.sandcorp.ci.DeployStatus
 import kr.sandcorp.ci.ExtraCheckouts
@@ -13,10 +14,13 @@ import kr.sandcorp.ci.StepScript
  * main 배포 파이프라인 — 저장소 Jenkinsfile 은 이것 한 번만 부른다. 인자·동작은 README.md.
  *
  *   배포할 커밋 확인(built-in, 재검사 생략 판정) → 이미지 빌드(macos, 못 잡으면 home; 검사와 나란히) → 배포(oracle, 실패하면 자동 롤백) → 디스코드
+ *   deployFrom: 'production' 이면 그 브랜치만 배포하고 굽지도 검사하지도 않는다 — 이미지가 ghcr 에 있는지 짧게 확인만(README 「승격 브랜치에서 배포」)
  *   main 커밋에 GitHub 커밋 상태 sandcorp/deploy(시작 pending, 끝 success|failure), 실패하면 병합된 PR 에 실패 댓글 — README 「배포 결과(GitHub)」
  */
 def call(Map args) {
     Map cfg = normalize(args)
+    // deployFrom 이 없으면 [jenkins] 하나뿐 — 지금처럼 언제나 Jenkins 가 굽는다.
+    List buildOnChoices = DeployFrom.buildOnChoices(cfg.deployFrom)
 
     pipeline {
         agent none
@@ -28,6 +32,7 @@ def call(Map args) {
         }
 
         parameters {
+            choice(name: 'BUILD_ON', choices: buildOnChoices, description: 'actions=GitHub Actions가 구워 승격한 이미지를 받아 배포(deployFrom 저장소의 기본). jenkins=Jenkins 노드에서 굽는다(비상 길, deployFrom 이 없는 저장소는 이것뿐)')
             choice(name: 'BUILDER', choices: ['auto', 'macos', 'home'], description: 'auto=macos 먼저, 못 잡으면 home. 시험용으로 강제 선택')
             string(name: 'MAC_WAIT_SECONDS', defaultValue: "${cfg.macWaitSeconds}", description: 'auto에서 macos 실행기를 기다리는 시간(초). 넘으면 home')
             string(name: 'ROLLBACK_SHA', defaultValue: '', description: '비우지 않으면 빌드 없이 이 커밋 sha의 이미지(ghcr)로 되돌린다(이미 배포한 sha 여도 다시 배포)')
@@ -45,7 +50,8 @@ def call(Map args) {
             }
 
             stage('이미지 빌드') {
-                when { expression { env.SANDCORP_SKIP != 'true' && !params.ROLLBACK_SHA?.trim() } }
+                // SANDCORP_BUILD_HERE 는 gate 가 정한다(DeployFrom.buildsHere — deployFrom 이 없으면 지금처럼 「되돌리기가 아니면 굽는다」).
+                when { expression { env.SANDCORP_SKIP != 'true' && env.SANDCORP_BUILD_HERE == 'true' } }
                 steps {
                     script { buildOnNodes(cfg) }
                 }
@@ -86,6 +92,13 @@ Map normalize(Map a) {
     List images = a.images ?: (a.image ? [[repo: a.image, envVar: a.imageVar]] : [])
     // buildScript 를 주는 저장소는 이미지를 스스로 굽는다 — images 는 배포 스크립트에 넘길 이름으로만 쓰고 비워도 된다.
     if (!images && !a.buildScript) { error('sandcorpDeploy: image(+imageVar) 또는 images 가 없다(buildScript 를 주면 비워도 된다) — README.md') }
+    if (a.deployFrom && !images) { error('sandcorpDeploy: deployFrom 은 기다릴 이미지 목록(image+imageVar 또는 images)이 있어야 한다 — README.md') }
+    String branch
+    try {
+        branch = DeployFrom.branch(a.deployFrom ?: '', a.branch ?: '')
+    } catch (IllegalArgumentException e) {
+        error("sandcorpDeploy: ${e.message} — README.md")
+    }
     List buildCredentials = (a.buildCredentials ?: []).collect { Map c ->
         if (!c.id || !c.variable) { error("sandcorpDeploy: buildCredentials 항목마다 id·variable 이 있어야 한다: ${c.keySet()}") }
         [id: c.id, variable: c.variable]
@@ -110,7 +123,11 @@ Map normalize(Map a) {
         autoRollback  : a.autoRollback == null ? true : (a.autoRollback ? true : false),
         // PR 검사가 main 에 들어온 바로 그 트리를 통과시켰으면 배포 전 재검사를 건너뛴다(README 「재검사 생략」). false 면 늘 재검사.
         skipCheckedTree: a.skipCheckedTree == null ? true : (a.skipCheckedTree ? true : false),
-        branch        : a.branch ?: 'main',
+        branch        : branch,
+        // 승격 브랜치(production 등)만 배포하고 굽지 않는다(README 「승격 브랜치에서 배포」). 비면 지금 동작.
+        deployFrom    : a.deployFrom ?: '',
+        imageWaitMinutes: (a.imageWaitMinutes ?: DeployFrom.IMAGE_WAIT_MINUTES) as int,
+        imageWaitHint : a.imageWaitHint ?: '',
         composeProject: a.composeProject,
         composeFiles  : (a.composeFiles ?: ['docker-compose.prod.yml']).join(':'),
         deployDir     : a.deployDir ?: '',
@@ -135,6 +152,8 @@ Map normalize(Map a) {
 
 void gate(Map cfg) {
     String rollbackSha = params.ROLLBACK_SHA?.trim() ?: ''
+    boolean buildHere = DeployFrom.buildsHere(cfg.deployFrom, params.BUILD_ON, rollbackSha)
+    env.SANDCORP_BUILD_HERE = buildHere ? 'true' : 'false'
     Map decision
     node(Nodes.CONTROLLER) {
         def v = checkout scm
@@ -170,7 +189,7 @@ void gate(Map cfg) {
     String prev = currentBuild.previousSuccessfulBuild?.buildVariables?.DEPLOY_SHA ?: ''
     env.SANDCORP_PREVIOUS_SHA = (prev && prev != env.DEPLOY_SHA) ? prev : ''
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollbackSha ? '되돌리기' : '빌드 대기')
-    if (!rollbackSha && cfg.check) {
+    if (buildHere && cfg.check) {
         Map s = cfg.skipCheckedTree ? checkedTree(cfg) : PrCheckSkip.recheck('skipCheckedTree: false')
         echo "== ${s.reason}"
         if (s.skip) {
@@ -347,6 +366,7 @@ void deployHere(Map cfg) {
     if (!rollback) {
         sh "git checkout -q --detach ${env.DEPLOY_SHA}"
     }
+    if (DeployFrom.waitsForImages(cfg.deployFrom, params.BUILD_ON, params.ROLLBACK_SHA?.trim())) { waitForImages(cfg, rollback) }
     if (cfg.extraCheckouts) { fetchExtraCheckouts(cfg) }
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "빌드 ${env.BUILT_ON}") + ' · oracle pull'
     String script = cfg.deployScript ?: "${pwd(tmp: true)}/sandcorp-deploy.sh"
@@ -405,6 +425,20 @@ void deployHere(Map cfg) {
         default:
             env.SANDCORP_ROLLBACK_FAILED = 'true'
             error("배포 실패 — 자동 롤백도 실패했다(종료 ${rc}). 운영을 바로 봐야 한다")
+    }
+}
+
+// deployFrom: Actions 가 승격 전에 이미 올린 이미지가 이 노드(배포 노드의 pull 자격)에서 보이는지 짧게 확인한다.
+// 되돌리기(ROLLBACK_SHA)도 옛 이미지가 남아 있는지 교체 전에 본다. 없으면 교체 전에 끝나 살아 있는 서비스는 그대로다.
+void waitForImages(Map cfg, boolean rollback) {
+    if (!rollback) { env.BUILT_ON = DeployFrom.ACTIONS }
+    try {
+        waitForGhcrImage(images: cfg.images.collect { "${it.repo}:${env.DEPLOY_SHA}".toString() },
+                         timeoutMinutes: cfg.imageWaitMinutes, intervalSeconds: 10, hint: cfg.imageWaitHint)
+    } catch (err) {
+        if (err.getClass().getName().endsWith('FlowInterruptedException')) { throw err }
+        env.SANDCORP_FAILED_STAGE = '이미지 기다리기'
+        throw err
     }
 }
 

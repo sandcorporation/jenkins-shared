@@ -1,5 +1,5 @@
 // 다른 곳(GitHub Actions 등)에서 굽는 이미지들이 레지스트리에 모두 나타날 때까지 기다린다.
-// 이미지를 Jenkins가 굽지 않는 저장소가 배포 단계 앞에서 부른다(시범: sandcorp-metrics). 기존 sandcorpDeploy는 이 단계를 쓰지 않는다.
+// 이미지를 Jenkins가 굽지 않는 저장소가 배포 단계 앞에서 부른다. sandcorpDeploy는 deployFrom 을 줄 때만 부른다.
 //
 //   waitForGhcrImage(images: ["ghcr.io/<org>/web:${sha}", "ghcr.io/<org>/api:${sha}"])
 //   waitForGhcrImage(image: '...', timeoutMinutes: 30, intervalSeconds: 10, hint: 'https://github.com/<org>/<repo>/actions')
