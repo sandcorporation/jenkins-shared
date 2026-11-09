@@ -1,8 +1,15 @@
+# PR 검사: bash tests/run.sh (deploy.sh 경로·Groovy 시험·컴파일·shellcheck·migrate 판정).
+# 보안 규칙: pull_request_target 금지, self-hosted 금지, 최소 권한, 비밀값 없음.
 name: test
 on:
   pull_request:
   push:
     branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-24.04
