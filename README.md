@@ -6,12 +6,14 @@ Sandcorp Jenkins 공용 라이브러리(빌드·배포·자동 롤백). Jenkins 
 ```
 vars/sandcorpDeploy.groovy        main 배포 파이프라인(선언형). 저장소 Jenkinsfile이 부르는 것
 vars/sandcorpPrCheck.groovy       PR 검사 파이프라인. 저장소 Jenkinsfile.pr이 부르는 것(멀티브랜치 잡)
+vars/waitForGhcrImage.groovy      다른 곳(GitHub Actions)에서 굽는 이미지(목록)가 GHCR에 나타날 때까지 기다리기(상한 30분) — 아래 「Actions에서 굽는 이미지」
 vars/sandcorpBuildNode.groovy     빌드 노드 고르기(먼저 노드를 기다리고 못 잡으면 다른 노드) — 배포(macos 먼저)·PR 검사(home 먼저)가 같이 쓴다
 src/kr/sandcorp/ci/Nodes.groovy   노드 라벨·노드 순서·자격 ID·대기 시간 — 이것들을 적는 유일한 곳
 src/kr/sandcorp/ci/DeployGate.groovy  이 빌드가 배포할지(순수 함수)
 src/kr/sandcorp/ci/DeployStatus.groovy  배포 결과 커밋 상태(sandcorp/deploy)에 쓸 값(순수 함수)
 src/kr/sandcorp/ci/BuildOutput.groovy  저장소 빌드 스크립트가 배포 스크립트에 넘기는 KEY=VALUE 읽기(순수 함수)
 resources/sandcorp/build-image.sh 빌드 노드에서 이미지 하나 굽기(buildx·레지스트리 캐시(CACHE_REF)·임시 DOCKER_CONFIG·--ssh default)
+resources/sandcorp/wait-ghcr-image.sh  docker manifest inspect 되풀이(10초 간격, 상한 넘으면 종료코드 1)
 resources/sandcorp/migrate-guard.sh  PR이 새로 더한 Django migration을 골라 migrate-guard.py에 넘긴다
 resources/sandcorp/migrate-guard.py  파괴적 migration 판정(표준 라이브러리만, python 3.8+)
 resources/sandcorp/deploy.sh      oracle에서 pull→DB 확인→migrate→교체→healthy→헬스, 실패하면 자동 롤백
@@ -243,6 +245,23 @@ null 불가 새 열은 둘 중 하나로 고친다.
 이 표시의 뜻은 **「이 migration이 지우는 것을 코드에서 이미 안 쓰게 한 배포가 끝났다」**이다(contract 단계라는 선언). 이유는 필수다(구분자 `—`·`-`·`:`; 이유가 없으면 통과하지 않는다). 표시가 있으면 그 파일 전체가 통과하고 로그에 이유가 찍힌다.
 로컬에서 미리 보기: `bash <jenkins-shared>/resources/sandcorp/migrate-guard.sh origin/main`(대상 저장소 루트에서).
 
+## Actions에서 굽는 이미지(`waitForGhcrImage`)
+
+이미지를 Jenkins가 아니라 GitHub Actions(`ubuntu-24.04-arm`, `push: main`만, `GITHUB_TOKEN`의 `packages: write`)가 굽는 저장소용 단계다. 시범은 sandcorp-metrics(`.github/workflows/image.yml`, 자체 Jenkinsfile). `sandcorpDeploy`·`sandcorpPrCheck`는 이 단계를 쓰지 않고 동작도 그대로다.
+
+```groovy
+@Library('sandcorp') _
+// 배포 노드에서, 배포 스크립트 앞에
+// 이미지 여럿(Actions matrix로 이미지마다 잡 하나)이면 목록으로 — 모두 생길 때까지 기다린다. 하나면 image: 도 된다.
+waitForGhcrImage(images: ["ghcr.io/<org>/web:${sha}", "ghcr.io/<org>/api:${sha}"], timeoutMinutes: 30, intervalSeconds: 10,
+                 hint: 'https://github.com/<org>/<repo>/actions/workflows/image.yml')
+```
+
+- 이미 나타난 이미지는 다시 묻지 않는다. 시간 초과 문구에는 아직 없는 이미지만 남는다.
+- 그 노드의 docker 로그인(배포 노드의 pull 자격)으로 `docker manifest inspect`를 되풀이한다. 새 자격은 없다.
+- 상한을 넘으면 `error`로 끝난다(이미지 워크플로가 실패해도 무한히 기다리지 않는다). 기다리는 동안 1분에 한 줄만 찍는다.
+- 태그·라벨(`org.opencontainers.image.source`·`revision`)은 굽는 쪽이 지금 `build-image.sh`와 같게 맞춘다 — 배포 쪽 compose·pull은 그대로다.
+
 ## 노드 라벨 바꾸는 곳
 
 `src/kr/sandcorp/ci/Nodes.groovy` 하나뿐이다(배포와 PR 검사가 같이 쓴다)(`MAC_BUILD`·`HOME_BUILD`·`DEPLOY`·`CONTROLLER`, 배포·PR 검사의 노드 순서 `DEPLOY_BUILD_ORDER`·`PR_CHECK_ORDER`, 자격 ID, 대기 기본값).
@@ -254,5 +273,5 @@ main에 병합하면 이 라이브러리를 쓰는 모든 저장소의 다음 �
 bash tests/run.sh
 ```
 
-도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) · `tests/FailureCommentTest.groovy`(실패 댓글 요지·비밀값 지우기) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
+도커·git이 있으면 된다: ① `tests/deploy_test.sh`(가짜 docker로 `deploy.sh` 성공·자동 롤백 경로) · `tests/build_image_test.sh`(`build-image.sh`의 buildx 인자 — 캐시 주소·ssh) · `tests/wait_ghcr_image_test.sh`(`wait-ghcr-image.sh` 나타남·시간 초과·여러 이미지) ② `tests/DeployGateTest.groovy`(배포할지 판단) · `tests/PrCheckSkipTest.groovy`(재검사 생략 판정) · `tests/NodesTest.groovy`(노드 순서) · `tests/FailureCommentTest.groovy`(실패 댓글 요지·비밀값 지우기) ③ Groovy 전부 `groovyc` 컴파일 ④ shellcheck ⑤ `tests/migrate_guard_test.py`(파괴적 migrate 판정, `python:3.9-slim` — 맥 노드 python3 호환) · `tests/migrate_guard_sh_test.sh`(새 migration만 고르기, git). GitHub Actions(`.github/workflows/test.yml`)가 PR마다 같은 것을 돌린다.
 Jenkins DSL(`pipeline`·`node`·`sh`)을 흉내 내는 시험은 없다 — 그 부분은 `@Library('sandcorp@<브랜치>')`로 실제 잡에서 본다.
