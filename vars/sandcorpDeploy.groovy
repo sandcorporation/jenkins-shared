@@ -50,7 +50,8 @@ def call(Map args) {
             }
 
             stage('이미지 빌드') {
-                when { expression { env.SANDCORP_SKIP != 'true' && DeployFrom.buildsHere(cfg.deployFrom, params.BUILD_ON, params.ROLLBACK_SHA?.trim()) } }
+                // SANDCORP_BUILD_HERE 는 gate 가 정한다(DeployFrom.buildsHere — deployFrom 이 없으면 지금처럼 「되돌리기가 아니면 굽는다」).
+                when { expression { env.SANDCORP_SKIP != 'true' && env.SANDCORP_BUILD_HERE == 'true' } }
                 steps {
                     script { buildOnNodes(cfg) }
                 }
@@ -151,6 +152,8 @@ Map normalize(Map a) {
 
 void gate(Map cfg) {
     String rollbackSha = params.ROLLBACK_SHA?.trim() ?: ''
+    boolean buildHere = DeployFrom.buildsHere(cfg.deployFrom, params.BUILD_ON, rollbackSha)
+    env.SANDCORP_BUILD_HERE = buildHere ? 'true' : 'false'
     Map decision
     node(Nodes.CONTROLLER) {
         def v = checkout scm
@@ -186,7 +189,7 @@ void gate(Map cfg) {
     String prev = currentBuild.previousSuccessfulBuild?.buildVariables?.DEPLOY_SHA ?: ''
     env.SANDCORP_PREVIOUS_SHA = (prev && prev != env.DEPLOY_SHA) ? prev : ''
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollbackSha ? '되돌리기' : '빌드 대기')
-    if (DeployFrom.buildsHere(cfg.deployFrom, params.BUILD_ON, rollbackSha) && cfg.check) {
+    if (buildHere && cfg.check) {
         Map s = cfg.skipCheckedTree ? checkedTree(cfg) : PrCheckSkip.recheck('skipCheckedTree: false')
         echo "== ${s.reason}"
         if (s.skip) {
