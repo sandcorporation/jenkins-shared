@@ -87,7 +87,7 @@ Map normalize(Map a) {
     }
     images = images.collect { Map im ->
         if (!im.repo || !im.envVar) { error("sandcorpDeploy: images 항목마다 repo·envVar 가 있어야 한다: ${im}") }
-        [repo: im.repo, envVar: im.envVar]
+        [repo: DeployFrom.ghcrRepo(im.repo), envVar: im.envVar]
     }
     return [
         name          : a.name,

@@ -22,4 +22,13 @@ class DeployFrom implements Serializable {
         return deployFrom ?: (branch ?: 'main')
     }
 
+    /** Accept only an untagged GHCR repository; the deploy pipeline appends the commit SHA tag. */
+    static String ghcrRepo(String repo) {
+        String pattern = /ghcr\.io\/[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*/
+        if (!repo || !(repo ==~ pattern)) {
+            throw new IllegalArgumentException("이미지는 ghcr.io 의 소문자 repository 경로만 받는다(SHA 태그는 라이브러리가 붙인다): '${repo}'".toString())
+        }
+        return repo
+    }
+
 }
