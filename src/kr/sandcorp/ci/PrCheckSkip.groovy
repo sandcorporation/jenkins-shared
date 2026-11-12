@@ -1,8 +1,8 @@
 package kr.sandcorp.ci
 
 /**
- * 배포 전 재검사를 건너뛸지 정한다 — PR 검사(sandcorpPrCheck)가 「main 에 들어온 바로 그 트리」를 이미 통과시켰을 때만.
- * Jenkins·GitHub 를 부르지 않는 순수 함수라 tests/PrCheckSkipTest.groovy 가 바로 돌린다. 값 모으기는 sandcorpDeploy 의 gate.
+ * 배포 실패 댓글을 달 대상 PR 을 찾기 위한 GitHub 응답 파싱 헬퍼.
+ * Jenkins·GitHub 를 부르지 않는 순수 함수라 tests/PrCheckSkipTest.groovy 가 바로 돌린다.
  *
  * 왜 이 조건이면 같은 트리인가:
  *   PR 검사는 PR head(H)를 그때의 main(B)에 머지한 결과를 검사한다. main 은 앞으로만 가므로 B 는 병합 커밋 M 의 부모 P 의 조상이다.
