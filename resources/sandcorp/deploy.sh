@@ -28,6 +28,11 @@
 #   DEPLOY_HEALTHY_TRIES     healthy 대기 횟수(기본 120, 1초 간격 — healthcheck start_interval 2s 를 놓치지 않게)
 #   DEPLOY_SLEEP             대기 간격 초(기본 2, 시험에서 0)
 #   DEPLOY_KEEP_IMAGES       저장소마다 남길 이미지 수(기본 3)
+#   DEPLOY_ENV_FILE          워크스페이스 밖 env 파일(Jenkins 노드 환경변수로 준다 — 저장소에 경로를 적지 않는다).
+#                            있으면 ./.env 를 그 파일을 가리키는 링크로 다시 만든다. 체크아웃 실패로 워크스페이스가
+#                            지워져도 비밀값이 사라지지 않는다. 읽을 수 없으면 교체 전에 1
+#   DEPLOY_REQUIRED_ENV      .env 에 빈 값이 아니어야 할 키(공백 구분, sandcorpDeploy requiredEnv). 하나라도 없으면 교체 전에 1
+#                            (compose 기본값으로 조용히 떨어지는 것 — 바인드 주소 등 — 을 막는다). 값은 찍지 않는다
 set -euo pipefail
 
 : "${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME 이 없다}"
@@ -37,8 +42,32 @@ nap="${DEPLOY_SLEEP:-2}"
 # healthy 대기는 1초(DEPLOY_SLEEP 이 더 작으면 그것). 2초면 start_interval 2s 와 엇갈려 한 번씩 늦게 본다.
 healthy_nap=$(( nap < 1 ? nap : 1 ))
 
+if [ -n "${DEPLOY_ENV_FILE:-}" ]; then
+  if [ ! -f "$DEPLOY_ENV_FILE" ] || [ ! -r "$DEPLOY_ENV_FILE" ]; then
+    echo "DEPLOY_ENV_FILE(노드 환경변수)이 가리키는 env 파일을 읽을 수 없다 — 교체 전에 멈춘다" >&2
+    exit 1
+  fi
+  ln -sfn "$DEPLOY_ENV_FILE" .env
+  echo "== .env → 노드의 DEPLOY_ENV_FILE"
+fi
+
 if [ ! -f .env ]; then
-  echo "워크스페이스에 .env가 없다. .env.example을 보고 만들어 두어야 한다." >&2
+  echo "워크스페이스에 .env가 없다. .env.example을 보고 만들어 두거나 노드에 DEPLOY_ENV_FILE 을 준다." >&2
+  exit 1
+fi
+
+# .env 에서 KEY 의 값(마지막 정의, 따옴표 벗김). 값은 비었는지만 본다.
+env_value() {
+  sed -n -E "s/^[[:space:]]*(export[[:space:]]+)?$1[[:space:]]*=[[:space:]]*//p" .env | tail -n 1 |
+    sed -E "s/[[:space:]]+$//; s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"
+}
+missing=""
+for key in ${DEPLOY_REQUIRED_ENV:-}; do
+  case "$key" in [A-Za-z_]*) ;; *) echo "DEPLOY_REQUIRED_ENV 키 모양이 틀렸다: $key" >&2; exit 1 ;; esac
+  [ -n "$(env_value "$key")" ] || missing="$missing $key"
+done
+if [ -n "$missing" ]; then
+  echo ".env 에 값이 없는 필수 키:$missing — 교체 전에 멈춘다(살아 있는 서비스는 그대로)" >&2
   exit 1
 fi
 

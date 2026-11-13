@@ -62,6 +62,13 @@ def call(Map args) {
 
 // ---------------------------------------------------------------- 인자
 
+String requiredEnvOf(Object raw) {
+    List keys = raw == null ? [] : (raw instanceof List ? raw : [raw]).collect { it.toString().trim() }.findAll { it }
+    List bad = keys.findAll { !(it ==~ /[A-Za-z_][A-Za-z0-9_]*/) }
+    if (bad) { error("sandcorpDeploy: requiredEnv 키 모양이 틀렸다: ${bad.join(', ')} — README.md") }
+    return keys.join(' ')
+}
+
 String deployNodeOf(Object raw) {
     try {
         return Nodes.deployNode(raw)
@@ -122,6 +129,8 @@ Map normalize(Map a) {
         healthCmd     : a.healthCmd ?: '',
         healthUrl     : a.healthUrl ?: '',
         keepImages    : (a.keepImages ?: 3) as int,
+        // .env 에 빈 값이 아니어야 할 키(README 「필수 env 키」). 값은 보지 않고 있는지만 — 없으면 교체 전에 실패.
+        requiredEnv   : requiredEnvOf(a.requiredEnv),
         timeoutMinutes: (a.timeoutMinutes ?: 90) as int,
         // 배포(oracle) 단계에서 checkout scm 뒤에 고정 sha 로 받을 다른 저장소(README 「다른 저장소 받기」). 없으면 [] — 지금과 같다.
         extraCheckouts: extraCheckoutsOf(a.extraCheckouts),
@@ -241,6 +250,7 @@ void deployHere(Map cfg) {
         "DEPLOY_MIGRATE=${cfg.migrate}", "DEPLOY_EXTRA_SERVICES=${cfg.extraServices}",
         "DEPLOY_KEEP_SERVICES=${cfg.keepServices}", "DEPLOY_HEALTH_CMD=${cfg.healthCmd}",
         "DEPLOY_HEALTH_URL=${cfg.healthUrl}", "DEPLOY_KEEP_IMAGES=${cfg.keepImages}",
+        "DEPLOY_REQUIRED_ENV=${cfg.requiredEnv}",
     ]
     // 이미지 변수(PORTFOLIO_IMAGE 등)도 넘겨 저장소 배포 스크립트가 그대로 쓸 수 있게 한다.
     List imageVars = cfg.images.collect { "${it.envVar}=${it.repo}:${env.DEPLOY_SHA}" }

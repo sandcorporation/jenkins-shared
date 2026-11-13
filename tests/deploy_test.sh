@@ -18,7 +18,7 @@ run() {
   shift 2
   local ws="$work/$name"
   mkdir -p "$ws"
-  : > "$ws/.env"
+  if [ "${NO_ENV:-0}" != 1 ]; then printf '%s' "${ENV_CONTENT:-}" > "$ws/.env"; fi
   : > "$ws/log"
   : > "$ws/state"
   (
@@ -109,6 +109,32 @@ fi
 mkdir -p "$work/no-env"
 ( cd "$work/no-env" && env PATH="$work/bin:$PATH" FAKE_LOG=/dev/null FAKE_STATE=/dev/null COMPOSE_PROJECT_NAME=demo DEPLOY_IMAGES=A=b bash "$script" >/dev/null 2>&1 )
 if [ $? = 1 ]; then pass=$((pass + 1)); else echo "FAIL no-env"; fail=$((fail + 1)); fi
+
+# 11) 필수 키: 있으면 통과(따옴표·export·공백 허용), 비었거나 없으면 pull 전에 1
+if ENV_CONTENT=$'A=1\nexport B="x y"\nC = \'z\'\n' run required-ok 0 DEPLOY_REQUIRED_ENV="A B C"; then
+  check "필수 키 있음: 배포됨" test "$(last_web)" = "ghcr.io/x/app:new"
+fi
+for c in $'A=1\n' $'A=1\nB=\n' $'A=1\nB=""\n' $'A=1\n# B=x\n' $'A=1\nBB=x\n'; do
+  if ENV_CONTENT="$c" run required-missing 1 DEPLOY_REQUIRED_ENV="A B"; then
+    check "필수 키 없음: pull 안 함" test "$(count ' pull ')" -eq 0
+    check "필수 키 없음: 키 이름만 찍는다" grep -q '필수 키: B' "$LAST/out"
+  fi
+  rm -rf "$work/required-missing"
+done
+
+# 12) DEPLOY_ENV_FILE: 워크스페이스에 .env 가 없어도 밖 파일로 링크해 배포, 필수 키도 그 파일에서 본다
+outside="$work/outside.env"
+printf 'A=1\n' > "$outside"
+if NO_ENV=1 run env-file 0 DEPLOY_ENV_FILE="$outside" DEPLOY_REQUIRED_ENV=A; then
+  check "env 파일: .env 가 링크" test "$(readlink "$LAST/.env")" = "$outside"
+  check "env 파일: 경로를 찍지 않는다" bash -c "! grep -qF '$outside' '$LAST/out'"
+fi
+# 워크스페이스의 옛 .env 보다 노드 파일이 이긴다
+ENV_CONTENT=$'A=\n' run env-file-wins 0 DEPLOY_ENV_FILE="$outside" DEPLOY_REQUIRED_ENV=A || true
+# 13) DEPLOY_ENV_FILE 이 없는 파일 → pull 전에 1
+if NO_ENV=1 run env-file-missing 1 DEPLOY_ENV_FILE="$work/nope.env"; then
+  check "env 파일 없음: pull 안 함" test "$(count ' pull ')" -eq 0
+fi
 
 echo "deploy.sh 시험: 통과 $pass, 실패 $fail"
 [ "$fail" = 0 ]
