@@ -12,7 +12,7 @@ import kr.sandcorp.ci.StepScript
 /**
  * main 배포 파이프라인 — 저장소 Jenkinsfile 은 이것 한 번만 부른다. 인자·동작은 README.md.
  *
- *   GitHub Actions 가 빌드·게시한 GHCR 이미지 확인 → 배포(oracle, 실패하면 자동 롤백) → 디스코드
+ *   GitHub Actions 가 빌드·게시한 GHCR 이미지 확인 → 배포(deployNode, 기본 oracle, 실패하면 자동 롤백) → 디스코드
  *   deployFrom: 'production' 이면 그 브랜치만 배포한다(README 「Deployment contract」)
  *   main 커밋에 GitHub 커밋 상태 sandcorp/deploy(시작 pending, 끝 success|failure), 실패하면 병합된 PR 에 실패 댓글 — README 「배포 결과(GitHub)」
  */
@@ -45,7 +45,7 @@ def call(Map args) {
             stage('배포') {
                 when { expression { env.SANDCORP_SKIP != 'true' } }
                 steps {
-                    script { deployOnOracle(cfg) }
+                    script { deployOnNode(cfg) }
                 }
             }
         }
@@ -61,6 +61,14 @@ def call(Map args) {
 }
 
 // ---------------------------------------------------------------- 인자
+
+String deployNodeOf(Object raw) {
+    try {
+        return Nodes.deployNode(raw)
+    } catch (IllegalArgumentException e) {
+        error("sandcorpDeploy: ${e.message} — README.md")
+    }
+}
 
 List extraCheckoutsOf(Object raw) {
     try {
@@ -101,6 +109,8 @@ Map normalize(Map a) {
         imageWaitHint : a.imageWaitHint ?: '',
         composeProject: a.composeProject,
         composeFiles  : (a.composeFiles ?: ['docker-compose.prod.yml']).join(':'),
+        // 배포가 도는 Jenkins 노드 라벨. 비면 oracle — 지금까지와 같다(README 「배포 노드」).
+        deployNode    : deployNodeOf(a.deployNode),
         deployDir     : a.deployDir ?: '',
         deployScript  : a.deployScript ?: '',
         service       : a.service ?: 'web',
@@ -195,10 +205,10 @@ Map lastAttempt() {
     return null
 }
 
-// ---------------------------------------------------------------- 3. 배포(oracle)
+// ---------------------------------------------------------------- 3. 배포(deployNode, 기본 oracle)
 
-void deployOnOracle(Map cfg) {
-    node(Nodes.DEPLOY) {
+void deployOnNode(Map cfg) {
+    node(cfg.deployNode) {
         if (cfg.deployDir) {
             ws(cfg.deployDir) { deployHere(cfg) }
         } else {
@@ -220,7 +230,7 @@ void deployHere(Map cfg) {
     }
     waitForImages(cfg)
     if (cfg.extraCheckouts) { fetchExtraCheckouts(cfg) }
-    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "Actions") + ' · oracle pull'
+    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "Actions") + " · ${cfg.deployNode} pull"
     String script = cfg.deployScript ?: "${pwd(tmp: true)}/sandcorp-deploy.sh"
     if (!cfg.deployScript) {
         writeFile file: script, text: libraryResource('sandcorp/deploy.sh')
@@ -234,7 +244,7 @@ void deployHere(Map cfg) {
     ]
     // 이미지 변수(PORTFOLIO_IMAGE 등)도 넘겨 저장소 배포 스크립트가 그대로 쓸 수 있게 한다.
     List imageVars = cfg.images.collect { "${it.envVar}=${it.repo}:${env.DEPLOY_SHA}" }
-    echo(cfg.images ? "== oracle은 굽지 않는다: ${imagesAt(cfg, env.DEPLOY_SHA)} 를 pull" : "== oracle은 굽지 않는다: ${DeployGate.short12(env.DEPLOY_SHA)} 이미지를 배포 스크립트가 pull")
+    echo(cfg.images ? "== ${cfg.deployNode}은 굽지 않는다: ${imagesAt(cfg, env.DEPLOY_SHA)} 를 pull" : "== ${cfg.deployNode}은 굽지 않는다: ${DeployGate.short12(env.DEPLOY_SHA)} 이미지를 배포 스크립트가 pull")
     // autoRollback: false 면 되돌릴 이미지를 주지 않는다 — 라이브러리 deploy.sh 는 종료 2(교체 뒤 실패, 되돌림 없음)로 끝난다.
     String previousImages = cfg.autoRollback ? imagesAt(cfg, env.SANDCORP_PREVIOUS_SHA) : ''
     int rc
@@ -244,7 +254,7 @@ void deployHere(Map cfg) {
         "SANDCORP_IMAGE_SHA=${env.DEPLOY_SHA}",
         'SANDCORP_ROLLBACK=0',
     ]) {
-        rc = runLogged('배포', Nodes.DEPLOY, "bash '${script}'", true)
+        rc = runLogged('배포', cfg.deployNode, "bash '${script}'", true)
     }
     if (rc != 0 && cfg.autoRollback && cfg.deployScript && env.SANDCORP_PREVIOUS_SHA) {
         // 저장소 배포 스크립트는 단계를 모르니, 실패하면 직전 이미지로 같은 스크립트를 한 번 더 돌린다(migrate 는 스크립트가 SANDCORP_ROLLBACK=1 을 보고 건너뛴다).
