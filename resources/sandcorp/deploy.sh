@@ -22,6 +22,8 @@
 #   DEPLOY_MIGRATE           줄마다 명령 하나. 각각 `compose run --rm --no-deps <주 서비스> sh -c <명령>`
 #   DEPLOY_EXTRA_SERVICES    주 서비스가 healthy 해진 뒤 새 이미지로 다시 만드는 서비스(worker 등)
 #   DEPLOY_KEEP_SERVICES     `up -d --no-deps` 만(고정 태그 서비스, 설정이 같으면 그대로)
+#                            PRE·KEEP 서비스는 떠 있는 컨테이너와 image 문자열만 다르고 같은 이미지(ID)·같은 정의면
+#                            up 을 건너뛴다(태그 → 태그@sha256 고정이 db 를 다시 만들지 않게, same_image_only_ref_changed)
 #   DEPLOY_HEALTH_CMD        주 서비스 컨테이너 안에서 돌릴 헬스 명령(sh -c)
 #   DEPLOY_HEALTH_URL        배포 노드에서 curl 로 볼 주소(둘 다 있으면 둘 다 본다)
 #   DEPLOY_HEALTH_TRIES      헬스 확인 시도 횟수(기본 3, DEPLOY_SLEEP*2 초 간격)
@@ -72,6 +74,43 @@ if [ -n "$missing" ]; then
 fi
 
 compose() { docker compose "$@"; }
+
+# 떠 있는 <svc> 컨테이너가 compose 의 image 문자열과 다른 문자열(예 태그 → 태그@sha256)로 만들어졌지만 같은 이미지(ID)를
+# 가리키고, image 를 컨테이너 문자열로 되돌린 정의 해시가 라벨과 같으면(= 다른 정의는 그대로) 0.
+# compose 는 정의 해시에 image 문자열이 들어가 이때도 up 이 컨테이너를 다시 만든다(compose v5.7 실측) — db 같은
+# 상태 있는 서비스가 재생성되지 않게 건너뛴다. 원하는 이미지가 로컬에 없거나(digest 를 올린 PR) 다르면 1 → up.
+same_image_only_ref_changed() {
+  local s=$1 cid cur_ref want_ref want_id ov hash label
+  [ -n "${COMPOSE_FILE:-}" ] || return 1 # override 를 붙일 파일 목록이 없으면 판정하지 않는다
+  cid=$(compose ps -q --status running "$s" 2>/dev/null | head -n 1) || return 1
+  [ -n "$cid" ] || return 1
+  cur_ref=$(docker inspect -f '{{.Config.Image}}' "$cid" 2>/dev/null) || return 1
+  want_ref=$(compose config --images "$s" 2>/dev/null) || return 1
+  [ -n "$cur_ref" ] || return 1
+  [ -n "$want_ref" ] || return 1
+  [ "$cur_ref" != "$want_ref" ] || return 1 # 같은 문자열이면 up 이 스스로 no-op 을 판단한다
+  want_id=$(docker image inspect -f '{{.Id}}' "$want_ref" 2>/dev/null) || return 1
+  [ -n "$want_id" ] || return 1
+  [ "$want_id" = "$(docker inspect -f '{{.Image}}' "$cid" 2>/dev/null)" ] || return 1
+  ov=$(mktemp "${TMPDIR:-/tmp}/sandcorp-deploy-ov.XXXXXX") || return 1
+  printf 'services:\n  %s:\n    image: "%s"\n' "$s" "$cur_ref" > "$ov"
+  hash=$(COMPOSE_FILE="${COMPOSE_FILE}${COMPOSE_PATH_SEPARATOR:-:}$ov" compose config --hash "$s" 2>/dev/null | awk '{print $2}') || hash=""
+  rm -f "$ov"
+  label=$(docker inspect -f '{{index .Config.Labels "com.docker.compose.config-hash"}}' "$cid" 2>/dev/null) || return 1
+  [ -n "$hash" ] && [ "$hash" = "$label" ]
+}
+
+# 기반 서비스(DEPLOY_PRE_SERVICES·DEPLOY_KEEP_SERVICES)를 올리는 곳은 모두 여기를 거친다.
+#   up_base <svc> <up 인자...>
+up_base() {
+  local s=$1
+  shift
+  if same_image_only_ref_changed "$s"; then
+    echo "$s 유지 — image 문자열만 바뀌고 같은 이미지(재생성 안 함)"
+    return 0
+  fi
+  compose up "$@" "$s"
+}
 
 # "VAR=이미지 ..." 를 export 한다.
 use_images() {
@@ -138,7 +177,7 @@ switch_and_check() {
   compose up -d --no-deps --no-build --force-recreate "$svc" || return 1
   wait_healthy || return 1
   for s in ${DEPLOY_KEEP_SERVICES:-}; do
-    compose up -d --no-deps "$s" || return 1
+    up_base "$s" -d --no-deps || return 1
   done
   for s in ${DEPLOY_EXTRA_SERVICES:-}; do
     compose up -d --no-deps --no-build --force-recreate "$s" || return 1
@@ -154,7 +193,7 @@ if [ -n "${DEPLOY_PRE_SERVICES:-}" ]; then
   defined=$(compose config --services)
   for s in $DEPLOY_PRE_SERVICES; do
     if printf '%s\n' "$defined" | grep -qx "$s"; then
-      compose up -d --wait "$s" || exit 1
+      up_base "$s" -d --wait || exit 1
     fi
   done
 fi

@@ -136,5 +136,41 @@ if NO_ENV=1 run env-file-missing 1 DEPLOY_ENV_FILE="$work/nope.env"; then
   check "env 파일 없음: pull 안 함" test "$(count ' pull ')" -eq 0
 fi
 
+# 14) 기반 서비스(PRE·KEEP): image 문자열만 바뀌고 같은 이미지면 up 을 건너뛴다(db 재생성 방지)
+same_ids="pg:17=sha256:p pg:17.11@sha256:aa=sha256:p r:1=sha256:r r:1@sha256:bb=sha256:r"
+base=(DEPLOY_PRE_SERVICES=db FAKE_RUNNING="db=pg:17 renderer=r:1")
+if run same-image 0 "${base[@]}" FAKE_WANT="db=pg:17.11@sha256:aa renderer=r:1@sha256:bb" FAKE_IMAGE_IDS="$same_ids"; then
+  check "같은 이미지: db up 안 부름" test "$(count 'compose up .* db$')" -eq 0
+  check "같은 이미지: renderer up 안 부름" test "$(count 'compose up .* renderer$')" -eq 0
+  check "같은 이미지: db 유지 로그" grep -q 'db 유지 — image 문자열만 바뀌고 같은 이미지(재생성 안 함)' "$LAST/out"
+  check "같은 이미지: renderer 유지 로그" grep -q 'renderer 유지 — image 문자열만' "$LAST/out"
+  check "같은 이미지: override 는 기존 파일 뒤에" grep -q '^config --hash COMPOSE_FILE=docker-compose.prod.yml:.' "$LAST/log"
+  check "같은 이미지: 주 서비스는 그대로 교체" test "$(last_web)" = "ghcr.io/x/app:new"
+  check "같은 이미지: worker 도 그대로 교체" grep -qx 'worker=ghcr.io/x/app:new' "$LAST/state"
+fi
+# 다른 이미지(digest 를 올린 PR) → up
+if run diff-image 0 "${base[@]}" FAKE_WANT="db=pg:18@sha256:cc renderer=r:1" FAKE_IMAGE_IDS="pg:17=sha256:p pg:18@sha256:cc=sha256:q r:1=sha256:r"; then
+  check "다른 이미지: db up" test "$(count 'compose up -d --wait db$')" -eq 1
+  check "다른 이미지: 유지 로그 없음" bash -c "! grep -q 'db 유지' '$LAST/out'"
+fi
+# 원하는 이미지가 로컬에 없음 → up 이 받는다
+if run want-missing 0 "${base[@]}" FAKE_WANT="db=pg:18@sha256:cc renderer=r:1" FAKE_IMAGE_IDS="pg:17=sha256:p"; then
+  check "이미지 없음: db up" test "$(count 'compose up -d --wait db$')" -eq 1
+fi
+# 같은 이미지지만 다른 정의(환경변수 등)도 바뀜 → up
+if run diff-def 0 "${base[@]}" FAKE_WANT="db=pg:17.11@sha256:aa renderer=r:1@sha256:bb" FAKE_IMAGE_IDS="$same_ids" FAKE_DEF=def2; then
+  check "다른 정의: db up" test "$(count 'compose up -d --wait db$')" -eq 1
+  check "다른 정의: renderer up" test "$(count 'compose up -d --no-deps renderer$')" -eq 1
+fi
+# 떠 있는 컨테이너 없음 → up
+if run no-container 0 DEPLOY_PRE_SERVICES=db FAKE_WANT="db=pg:17.11@sha256:aa" FAKE_IMAGE_IDS="$same_ids"; then
+  check "컨테이너 없음: db up" test "$(count 'compose up -d --wait db$')" -eq 1
+  check "컨테이너 없음: renderer up" test "$(count 'compose up -d --no-deps renderer$')" -eq 1
+fi
+# 같은 문자열 → up(no-op 판단은 compose 몫)
+if run same-ref 0 "${base[@]}" FAKE_IMAGE_IDS="$same_ids"; then
+  check "같은 문자열: db up" test "$(count 'compose up -d --wait db$')" -eq 1
+fi
+
 echo "deploy.sh 시험: 통과 $pass, 실패 $fail"
 [ "$fail" = 0 ]
