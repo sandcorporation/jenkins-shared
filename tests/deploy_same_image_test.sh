@@ -30,6 +30,7 @@ trap cleanup EXIT
 
 mkdir -p "$work/bin"
 real_docker=$(command -v docker)
+# shellcheck disable=SC2016 # $1·$@ 는 만들어질 래퍼 스크립트 안에서 펼쳐진다
 printf '#!/usr/bin/env bash\n[ "$1" = pull ] && exit 0\nexec %q "$@"\n' "$real_docker" > "$work/bin/docker"
 chmod +x "$work/bin/docker"
 : > "$work/.env"
