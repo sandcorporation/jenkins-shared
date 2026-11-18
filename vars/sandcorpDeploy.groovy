@@ -314,6 +314,7 @@ void waitForImages(Map cfg) {
 
 // extraCheckouts: 배포할 sha 의 refFile 이 고정한 커밋을 dir 에 얕게 받는다(교체 전 — 실패하면 살아 있는 서비스는 그대로).
 // Actions 이미지 빌드에는 포함하지 않는다. 되돌리기(ROLLBACK_SHA)는 지금 main 의 refFile 을 쓴다.
+// optional 항목은 ref 가 없거나·0 들이거나·자격이 없거나·받기에 실패하면 경고만 남기고 건너뛴다(ExtraCheckouts.plan).
 void fetchExtraCheckouts(Map cfg) {
     String tmp = pwd(tmp: true)
     String script = "${tmp}/sandcorp-extra-checkout.sh"
@@ -321,21 +322,40 @@ void fetchExtraCheckouts(Map cfg) {
     writeFile file: script, text: libraryResource('sandcorp/extra-checkout.sh')
     writeFile file: knownHosts, text: libraryResource('sandcorp/github_known_hosts')
     for (Map e in cfg.extraCheckouts) {
-        String sha
+        Map p
         try {
-            sha = ExtraCheckouts.parseRef(e.refFile, readFile(file: e.refFile, encoding: 'UTF-8'))
+            String text = (e.optional && !fileExists(e.refFile)) ? null : readFile(file: e.refFile, encoding: 'UTF-8')
+            p = ExtraCheckouts.plan(e, text)
         } catch (IllegalArgumentException ex) {
             env.SANDCORP_FAILED_STAGE = '다른 저장소 받기'
             error("배포 실패 — ${ex.message}")
         }
+        if (p.skip) {
+            echo ExtraCheckouts.skipWarning(e, p.skip as String)
+            continue
+        }
+        String sha = p.sha
         // dir 은 normalize 가 워크스페이스 바로 아래 한 칸 이름으로 검증했다. 지우기는 Jenkins deleteDir(셸 rm 아님).
         dir(e.dir) { deleteDir() }
-        withCredentials([sshUserPrivateKey(credentialsId: e.credentialsId, keyFileVariable: 'SANDCORP_EXTRA_KEY')]) {
-            int rc = sh(returnStatus: true, script: ExtraCheckouts.command(script, knownHosts, e, sha))
-            if (rc != 0) {
-                env.SANDCORP_FAILED_STAGE = '다른 저장소 받기'
-                error("배포 실패 — ${e.url} @ ${DeployGate.short12(sha)} 받기 실패(종료 ${rc}). 교체 전이라 살아 있는 서비스는 그대로다")
+        int rc
+        try {
+            withCredentials([sshUserPrivateKey(credentialsId: e.credentialsId, keyFileVariable: 'SANDCORP_EXTRA_KEY')]) {
+                rc = sh(returnStatus: true, script: ExtraCheckouts.command(script, knownHosts, e, sha))
             }
+        } catch (err) {
+            // 자격이 없으면 withCredentials 가 던진다. 사람이 멈춘 것(FlowInterrupted)과 optional 아닌 항목은 그대로 던진다.
+            if (!e.optional || err.getClass().getName().endsWith('FlowInterruptedException')) { throw err }
+            echo ExtraCheckouts.skipWarning(e, "자격 ${e.credentialsId} 를 쓸 수 없음(${err.getMessage()})")
+            continue
+        }
+        if (rc != 0) {
+            String why = "${e.url} @ ${DeployGate.short12(sha)} 받기 실패(종료 ${rc})"
+            if (e.optional) {
+                echo ExtraCheckouts.skipWarning(e, why)
+                continue
+            }
+            env.SANDCORP_FAILED_STAGE = '다른 저장소 받기'
+            error("배포 실패 — ${why}. 교체 전이라 살아 있는 서비스는 그대로다")
         }
     }
 }
