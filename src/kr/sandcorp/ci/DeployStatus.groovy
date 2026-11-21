@@ -14,6 +14,9 @@ class DeployStatus implements Serializable {
 
     static final String CONTEXT = 'sandcorp/deploy'
     static final int MAX_DESCRIPTION = 140
+    /** 배포 작업 폴더의 배포 뒤 확인 요약 파일(저장소 배포 스크립트가 쓴다). 배포 시작 때 지우고, 끝난 뒤 읽는다. */
+    static final String POSTDEPLOY_FILE = '.postdeploy-summary'
+    static final int MAX_POSTDEPLOY = 60
     /** 실패 댓글 제목 앞머리. wait-deploy.py 가 이것과 배포 sha 앞 12자로 댓글을 찾는다. */
     static final String COMMENT_PREFIX = '배포 실패 — '
 
@@ -29,6 +32,7 @@ class DeployStatus implements Serializable {
      * @param a.failedStage   실패한 단계(검사|이미지 굽기|배포) 또는 비움
      * @param a.rolledBackTo  자동 롤백한 sha(성공)
      * @param a.rollbackFailed 자동 롤백도 실패했는가
+     * @param a.postDeploy    배포 뒤 확인 요약(postDeploySummary 가 다듬은 한 줄) 또는 비움. 있으면 빌드 노드·걸린 시간 앞에 붙는다
      * @param a.took          걸린 시간(사람이 읽는 문자열) 또는 비움
      */
     static Map finish(Map a) {
@@ -51,6 +55,7 @@ class DeployStatus implements Serializable {
                 parts << (a.failedStage ? "${a.failedStage} 실패".toString() : "실패(${result})".toString())
             }
         }
+        if (a.postDeploy) { parts << (a.postDeploy as String) }
         if (a.builtOn) { parts << "빌드 ${a.builtOn}".toString() }
         if (a.took) { parts << (a.took as String) }
         return payload(state, "빌드 #${a.build} · " + parts.join(' · '))
@@ -73,6 +78,14 @@ class DeployStatus implements Serializable {
     static String stateIn(List statuses) {
         Map s = (statuses ?: []).find { Map it -> it.context == CONTEXT } as Map
         return s ? (s.state as String) : null
+    }
+
+    /** .postdeploy-summary 원문 → 상태 설명에 붙일 한 줄. 첫 줄만, 앞뒤 공백 제거, 60자 초과는 …로 자른다. 비었으면 ''. */
+    static String postDeploySummary(String raw) {
+        String line = (raw ?: '').readLines().find { it.trim() } ?: ''
+        line = line.trim()
+        if (line.length() > MAX_POSTDEPLOY) { line = line.substring(0, MAX_POSTDEPLOY - 1) + '…' }
+        return line
     }
 
     static Map payload(String state, def description) {

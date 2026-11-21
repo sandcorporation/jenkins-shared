@@ -33,6 +33,8 @@ Deployment options include `name`, `composeProject`, `image`/`imageVar` or `imag
 
 `requiredEnv` (optional) lists keys that must have a non-empty value in the deployment `.env`; if any is missing the deploy stops before pulling or replacing anything (values are never printed). Use it for settings whose Compose default would silently change behaviour, such as a bind address. The workspace `.env` is lost whenever Jenkins wipes the workspace (for example after a failed checkout). To keep it outside, set the node environment variable `DEPLOY_ENV_FILE` to an env file path on that node; the deploy script then recreates `./.env` as a link to it before every deploy (the node file wins over an existing workspace `.env`). Keep the path in the node configuration, not in a repository.
 
+If the deploy workspace contains `.postdeploy-summary` after the deploy script finishes (success, failure or rollback), its first line (trimmed, at most 60 characters) is added to the GitHub commit status description before the build node and duration, for example `빌드 #726 · 성공 · 확인 통과(rollback, 15초) · 빌드 actions · 1 min 41 sec`. The file is deleted before each deploy so a stale one is never read; without it the description is unchanged. The repository's deploy script writes the file.
+
 The retired arguments `check`, `buildSsh`, `builder`, `buildScript`, `buildCredentials`, `platform`, `sourceUrl`, `skipCheckedTree`, and `macWaitSeconds` fail fast with migration guidance. Move those checks and image-building steps to the repository's GitHub Actions workflows. Remove `Jenkinsfile.pr` jobs and any calls to `sandcorpPrCheck`; PR required checks must come from Actions. The shared library no longer exposes Jenkins build-node selection.
 
 ## Build and test this library

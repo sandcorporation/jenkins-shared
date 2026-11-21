@@ -72,4 +72,19 @@ ok('비밀값 지움', !body.contains('token='))
 ok('빌드 URL 없으면 종료 코드만', bl[-1] == '종료 코드 1')
 ok('PR 검사 제목은 그대로', FailureComment.body(stage: '검사', head: 'h', where: 'home', build: '1', code: 1, output: 'x').startsWith(FailureComment.TITLE_PREFIX))
 
+
+// 배포 뒤 확인 요약(#38)
+eq('요약 없으면 지금과 같다', DeployStatus.finish(build: 7, result: 'SUCCESS', builtOn: 'actions', took: '1 min 41 sec', postDeploy: '').description,
+   DeployStatus.finish(build: 7, result: 'SUCCESS', builtOn: 'actions', took: '1 min 41 sec').description)
+eq('요약은 빌드 노드·시간 앞', DeployStatus.finish(build: 726, result: 'SUCCESS', builtOn: 'actions', took: '1 min 41 sec', postDeploy: '확인 통과(rollback, 15초)').description,
+   '빌드 #726 · 성공 · 확인 통과(rollback, 15초) · 빌드 actions · 1 min 41 sec')
+eq('실패 되돌림에도 실린다', DeployStatus.finish(build: 5, result: 'FAILURE', rolledBackTo: '0123456789abcdef', postDeploy: '확인 실패(핵심 경로) → 되돌림 0123456789ab').description,
+   '빌드 #5 · 실패 → 0123456789ab 자동 롤백 · 확인 실패(핵심 경로) → 되돌림 0123456789ab')
+eq('요약 파일 첫 줄·공백 제거', DeployStatus.postDeploySummary('  확인 꺼짐  \n둘째 줄\n'), '확인 꺼짐')
+eq('빈 파일', DeployStatus.postDeploySummary(''), '')
+eq('공백뿐인 파일', DeployStatus.postDeploySummary(' \n\t\n'), '')
+eq('null', DeployStatus.postDeploySummary(null), '')
+eq('긴 요약은 60자', DeployStatus.postDeploySummary('가' * 200).length(), 60)
+ok('긴 요약 끝 …', DeployStatus.postDeploySummary('가' * 200).endsWith('…'))
+ok('긴 요약이어도 설명 140자 안', DeployStatus.finish(build: 1, result: 'SUCCESS', builtOn: 'actions', checkSkipped: 'x' * 40, took: '1 min 41 sec', postDeploy: DeployStatus.postDeploySummary('가' * 200)).description.length() <= 140)
 println "DeployStatusTest 통과: ${n}건"
