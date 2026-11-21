@@ -237,6 +237,8 @@ void deployHere(Map cfg) {
     if (!rollback) {
         sh "git checkout -q --detach ${env.DEPLOY_SHA}"
     }
+    // 낡은 배포 뒤 확인 요약을 읽지 않게, 이번 배포 스크립트가 돌기 전에 지운다(작업 폴더는 빌드 사이에 남는다).
+    sh "rm -f -- '${DeployStatus.POSTDEPLOY_FILE}'"
     waitForImages(cfg)
     if (cfg.extraCheckouts) { fetchExtraCheckouts(cfg) }
     currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "Actions") + " · ${cfg.deployNode} pull"
@@ -276,6 +278,10 @@ void deployHere(Map cfg) {
             rc2 = sh(script: "bash '${script}'", returnStatus: true)
         }
         rc = rc2 == 0 ? 3 : 4
+    }
+    // 끝 상태를 달 곳은 다른 노드(built-in)라 작업 폴더를 못 본다 — 여기서 읽어 env 로 넘긴다. 실패·롤백 경로도 switch 전에 읽는다.
+    if (fileExists(DeployStatus.POSTDEPLOY_FILE)) {
+        env.SANDCORP_POSTDEPLOY = DeployStatus.postDeploySummary(readFile(DeployStatus.POSTDEPLOY_FILE))
     }
     switch (rc) {
         case 0:
@@ -381,6 +387,7 @@ void finish(Map cfg) {
                 failedStage   : env.SANDCORP_FAILED_STAGE ?: '',
                 rolledBackTo  : env.SANDCORP_ROLLED_BACK_TO ?: '',
                 rollbackFailed: env.SANDCORP_ROLLBACK_FAILED == 'true',
+                postDeploy    : env.SANDCORP_POSTDEPLOY ?: '',
                 took          : currentBuild.durationString.replace(' and counting', ''),
             ))
         }
