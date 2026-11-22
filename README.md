@@ -23,6 +23,8 @@ sandcorpDeploy(
 
 `image` + `imageVar` describes one GHCR image. For multiple images use `images: [[repo: 'ghcr.io/org/web', envVar: 'WEB_IMAGE'], ...]`. Compose files receive the image variable set to `<repo>:<commit-sha>`. The optional `deployFrom` selects a promotion branch; all deploys, including rollback by `ROLLBACK_SHA`, wait for the exact GHCR image to appear. Jenkins never builds an image.
 
+A build woken by the push webhook skips a commit that already deployed successfully (`이미 배포에 성공한 sha`). A build started by a person (Build Now) deploys that same commit again, e.g. after changing only deployment values; its description reads `수동 다시 배포`, it posts the normal main commit status, and it is not a rollback (`ROLLBACK_SHA` stays the only rollback path).
+
 Deployment options include `name`, `composeProject`, `image`/`imageVar` or `images`, `deployFrom`/`branch`, `imageWaitMinutes`, `imageWaitHint`, `composeFiles`, `deployNode`, `deployDir`, `service`, `preServices`, `dbCheck`, `migrate`, `keepServices`, `extraServices`, `healthCmd`, `healthUrl`, `keepImages`, `requiredEnv`, `autoRollback`, `extraCheckouts`, and `deployScript`. Deployment, rollback, GitHub status reporting, and Discord notifications remain Jenkins responsibilities.
 
 `deployNode` (optional) is a plain Jenkins node label (letters, digits, `_`, `.`, `-`; no label expressions) for a repository whose service runs on a host other than `oracle`. Omitted or empty means `oracle`, so existing Jenkinsfiles are unchanged. The node needs Docker with Compose, read access to the GHCR images, and the job workspace `.env` as on `oracle`.
