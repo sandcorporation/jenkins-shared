@@ -175,7 +175,7 @@ void gate(Map cfg) {
     // 자동 롤백 대상: 직전 성공 빌드가 올린 sha. 새 sha 와 같으면 되돌릴 곳이 없다.
     String prev = currentBuild.previousSuccessfulBuild?.buildVariables?.DEPLOY_SHA ?: ''
     env.SANDCORP_PREVIOUS_SHA = (prev && prev != env.DEPLOY_SHA) ? prev : ''
-    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollbackSha ? '되돌리기' : '빌드 대기')
+    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollbackSha ? '되돌리기' : (decision.kind == 'redeploy' ? '수동 다시 배포' : '빌드 대기'))
 }
 
 // GitHub REST GET. 토큰은 환경변수로만 넘기고 찍지 않는다. 실패(4xx·5xx·시간 초과)는 예외 → 재검사.
@@ -241,7 +241,7 @@ void deployHere(Map cfg) {
     sh "rm -f -- '${DeployStatus.POSTDEPLOY_FILE}'"
     waitForImages(cfg)
     if (cfg.extraCheckouts) { fetchExtraCheckouts(cfg) }
-    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : "Actions") + " · ${cfg.deployNode} pull"
+    currentBuild.description = "${DeployGate.short12(env.DEPLOY_SHA)} · " + (rollback ? '되돌리기' : (env.SANDCORP_GATE_KIND == 'redeploy' ? '수동 다시 배포' : "Actions")) + " · ${cfg.deployNode} pull"
     String script = cfg.deployScript ?: "${pwd(tmp: true)}/sandcorp-deploy.sh"
     if (!cfg.deployScript) {
         writeFile file: script, text: libraryResource('sandcorp/deploy.sh')

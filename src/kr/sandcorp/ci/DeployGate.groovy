@@ -19,7 +19,7 @@ class DeployGate implements Serializable {
      * @param a.lastSuccess    직전 성공 빌드의 [main: sha] 또는 null
      * @param a.lastAttempt    배포까지 간 가장 최근 빌드의 [main: sha, result: 'SUCCESS'|'FAILURE'] 또는 null
      * @return [deploy: boolean, reason: String, kind: String]
-     *         kind = rollback | branch | unknown | deployed(이미 성공한 sha) | failed(직전 배포가 실패한 sha) | deploy — DeployStatus.onSkip 이 본다
+     *         kind = rollback | branch | unknown | deployed(이미 성공한 sha) | redeploy(사람이 돌린 이미 성공한 sha) | failed(직전 배포가 실패한 sha) | deploy — DeployStatus.onSkip 이 본다
      */
     static Map decide(Map a) {
         if (a.rollbackSha) {
@@ -34,6 +34,11 @@ class DeployGate implements Serializable {
             return [deploy: false, reason: 'main 커밋을 알 수 없다', kind: 'unknown']
         }
         if (a.lastSuccess?.main == a.mainSha) {
+            // 사람이 「Build Now」로 돌렸으면 같은 sha 를 다시 배포한다(배포 값만 바꿔 다시 올리는 길). 되돌리기가 아니다:
+            // DEPLOY_SHA 는 main 그대로이고 ROLLBACK_SHA 분기를 타지 않는다. 웹훅이 깨운 빌드는 아래처럼 건너뛴다.
+            if (a.manual) {
+                return [deploy: true, reason: "수동 다시 배포 · 이미 배포에 성공한 sha ${short12(a.mainSha)}".toString(), kind: 'redeploy']
+            }
             return [deploy: false, reason: "이미 배포에 성공한 sha ${short12(a.mainSha)} — main 이 움직이지 않았다(작업 브랜치 push 등)".toString(), kind: 'deployed']
         }
         // 실패한 sha 를 push 마다 다시 배포하면, 깨진 커밋이 작업 브랜치 push 때마다 배포→자동 롤백을 되풀이한다.
