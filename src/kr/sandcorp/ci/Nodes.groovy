@@ -13,6 +13,8 @@ class Nodes implements Serializable {
     static final String GITHUB_API_CREDENTIALS = 'github-sandcorporation-token'
     /** 디스코드 배포 알림 웹훅(Secret text). URL 은 로그에 찍지 않는다. */
     static final String DISCORD_CREDENTIALS = 'discord-deploy-webhook'
+    /** 둘째 배포 알림 웹훅(Secret text, 디스코드 꼴 {"content": …} 을 받는 곳). 없으면 알림이 한 줄 남기고 건너뛴다. URL 은 로그에 찍지 않는다. */
+    static final String NOTICE_CREDENTIALS = 'deploy-notice-webhook'
 
     /**
      * sandcorpDeploy 인자 deployNode 를 배포 노드 라벨로. 비면 DEPLOY(oracle) — 지금까지와 같다.
