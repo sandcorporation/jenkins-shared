@@ -2,6 +2,7 @@ import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
 import kr.sandcorp.ci.DeployFrom
 import kr.sandcorp.ci.DeployGate
+import kr.sandcorp.ci.DeployNotice
 import kr.sandcorp.ci.DeployStatus
 import kr.sandcorp.ci.ExtraCheckouts
 import kr.sandcorp.ci.FailureComment
@@ -395,11 +396,30 @@ void finish(Map cfg) {
     }
 }
 
+// 배포 끝 알림: 같은 본문을 DeployNotice.TARGETS 마다 따로 보낸다. 어느 쪽 실패도 빌드 결과를 바꾸지 않고,
+// 한쪽이 실패해도 다음 곳은 간다. optional 곳은 자격이 없으면(withCredentials 가 던짐) 한 줄만 남기고 건너뛴다.
 void notifyDiscord(Map cfg) {
-    catchError(buildResult: null, stageResult: null, message: '디스코드 알림 실패 — 배포 결과와 무관하다') {
-        withCredentials([string(credentialsId: Nodes.DISCORD_CREDENTIALS, variable: 'DISCORD_WEBHOOK')]) {
-            writeFile file: 'discord-payload.json', text: JsonOutput.toJson([content: discordText(cfg)])
-            sh 'curl -sS -X POST -H "Content-Type: application/json" --data @discord-payload.json "$DISCORD_WEBHOOK" > /dev/null || true'
+    String payload = null
+    catchError(buildResult: null, stageResult: null, message: '알림 본문 만들기 실패 — 배포 결과와 무관하다') {
+        payload = DeployNotice.payload(discordText(cfg))
+    }
+    if (payload == null) { return }
+    for (Map t in DeployNotice.TARGETS) { sendNotice(t, payload) }
+}
+
+void sendNotice(Map t, String payload) {
+    catchError(buildResult: null, stageResult: null, message: "${t.label} 알림 실패 — 배포 결과와 무관하다".toString()) {
+        boolean bound = false
+        try {
+            withCredentials([string(credentialsId: t.credentialsId, variable: 'NOTICE_WEBHOOK')]) {
+                bound = true
+                writeFile file: 'notice-payload.json', text: payload
+                sh 'curl -sS -X POST -H "Content-Type: application/json" --data @notice-payload.json "$NOTICE_WEBHOOK" > /dev/null || true'
+            }
+        } catch (err) {
+            // 자격을 묶은 뒤의 실패, optional 아닌 곳, 사람이 멈춘 것(FlowInterrupted)은 그대로 던진다(catchError 가 경고로 받는다).
+            if (bound || !t.optional || err.getClass().getName().endsWith('FlowInterruptedException')) { throw err }
+            echo DeployNotice.skipLine(t, err.getMessage() ?: err.getClass().getSimpleName())
         }
     }
 }

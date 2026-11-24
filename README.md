@@ -27,6 +27,16 @@ A build woken by the push webhook skips a commit that already deployed successfu
 
 Deployment options include `name`, `composeProject`, `image`/`imageVar` or `images`, `deployFrom`/`branch`, `imageWaitMinutes`, `imageWaitHint`, `composeFiles`, `deployNode`, `deployDir`, `service`, `preServices`, `dbCheck`, `migrate`, `keepServices`, `extraServices`, `healthCmd`, `healthUrl`, `keepImages`, `requiredEnv`, `autoRollback`, `extraCheckouts`, and `deployScript`. Deployment, rollback, GitHub status reporting, and Discord notifications remain Jenkins responsibilities.
 
+Jenkins credentials the library reads (IDs in `src/kr/sandcorp/ci/Nodes.groovy`; values never appear in the console):
+
+| ID | Kind | Used for |
+|---|---|---|
+| `github-sandcorporation-token` | Username with password (password = token) | GitHub commit status, PR failure comments, recheck decisions |
+| `discord-deploy-webhook` | Secret text | Deployment finish notice (Discord) |
+| `deploy-notice-webhook` | Secret text | The same notice body, sent separately to a second webhook that accepts the Discord shape `{"content": …}`. Optional: if the credential is missing, the build prints one `알림 건너뜀 — …` line and continues |
+
+Each notice target is sent on its own; a failure in one does not stop the other, and no notice failure changes the build result.
+
 `deployNode` (optional) is a plain Jenkins node label (letters, digits, `_`, `.`, `-`; no label expressions) for a repository whose service runs on a host other than `oracle`. Omitted or empty means `oracle`, so existing Jenkinsfiles are unchanged. The node needs Docker with Compose, read access to the GHCR images, and the job workspace `.env` as on `oracle`.
 
 `extraCheckouts` (optional) fetches other repositories at a pinned commit during the deploy stage, before anything is replaced: `[[url: 'git@github.com:<owner>/<repo>.git', refFile: 'path/in/repo.ref', dir: '<one-level dir>', credentialsId: '<ssh key credential>'], ...]`. `refFile` holds one 40-character lowercase sha. By default a missing or malformed ref, a missing credential, or a failed fetch stops the deploy. Add `optional: true` to an entry to turn those cases, and an all-zero sha (no commit pinned yet), into a `경고: 다른 저장소 받기 건너뜀(optional) …` line; the entry is skipped and the deploy continues.
